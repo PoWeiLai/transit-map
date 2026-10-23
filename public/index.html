@@ -49,6 +49,8 @@
     .dirs li.now { font-weight:700; color:var(--accent); }
     .links { display:flex; gap:6px; margin-top:6px; }
     .links a { font-size:12px; padding:3px 8px; border:1px solid var(--line); border-radius:6px; text-decoration:none; color:var(--fg); }
+    a.uber { background:#000; color:#fff !important; border-color:#000; }
+    .leaflet-popup-content a.uber { display:inline-block; margin-top:6px; padding:3px 8px; border-radius:6px; text-decoration:none; font-size:12px; }
     details summary { cursor:pointer; font-size:13px; color:var(--muted); margin-top:4px; }
     #nav { display:none; position:sticky; top:0; z-index:5; background:#1f2937; color:#fff; padding:14px 16px; }
     #nav.on { display:block; }
@@ -173,7 +175,8 @@
       for (const s of list) {
         const name = `${s.name}站`;
         const box = document.createElement('div');
-        box.innerHTML = `<b>🚄 ${esc(name)}</b><br><button data-k="from">設為出發點</button> <button data-k="to">設為目的地</button>`;
+        box.innerHTML = `<b>🚄 ${esc(name)}</b><br><button data-k="from">設為出發點</button> <button data-k="to">設為目的地</button>
+          <br>${uberA(null, { lat: s.lat, lng: s.lng, name }, '🚗 Uber 叫車到這站')}`;
         box.addEventListener('click', (ev) => {
           if (ev.target.dataset.k) setPoint(ev.target.dataset.k, { lat: s.lat, lng: s.lng, name }, name);
         });
@@ -221,28 +224,36 @@
       show('<div class="card muted">規劃中…</div>');
       try {
         const [from, to] = [await resolve('from'), await resolve('to')];
-        const params = new URLSearchParams({ from: `${from.lat},${from.lng}`, to: `${to.lat},${to.lng}` });
-        if (state.mode === 'bus') return renderBus(await api('/api/bus?' + params), from, to);
-        if (state.mode === 'tra' || state.mode === 'thsr') {
-          return renderRail(await api(`/api/rail?system=${state.mode}&${params}`), from, to);
-        }
-        if (state.mode === 'scooter') {
-          // 填業者名稱是想找車，但車輛位置沒有公開資料，只能請使用者到 App 查
-          if (/goshare|gogoro|wemo|irent|威摩/i.test($('vehicle').value)) {
-            throw new Error('網站查不到共享機車的位置（業者沒有公開）。請在 GoShare／WeMo App 找到車後，把「車子停的地址」填在取車位置，或點地圖 →「設為取車位置」；不填也可以，會從出發點開始規劃。');
-          }
-          const vehicle = $('vehicle').value.trim() ? await resolve('vehicle') : null;
-          if (vehicle) params.set('vehicle', `${vehicle.lat},${vehicle.lng}`);
-          if (state.parking) params.set('parking', state.parking);
-          return renderScooter(await api('/api/scooter?' + params), from, to);
-        }
-        if (state.pickup) params.set('pickup', state.pickup);
-        if (state.dropoff) params.set('dropoff', state.dropoff);
-        if (/站/.test(from.name)) params.set('mrt', '1'); // 從車站出發 → 建議出口
-        render(await api('/api/plan?' + params), from, to);
+        await planMode(from, to);
+        // 每種交通方式的結果下面都可以直接叫車
+        $('out').insertAdjacentHTML('beforeend', `<div class="card"><h2>🚗 不想轉乘？直接叫 Uber</h2>
+          <div class="links">${uberA(from, to, `Uber：${esc(from.name)} → ${esc(to.name)}`)}</div>
+          <p class="hint">會開啟 Uber App（沒裝則開網頁版），車資與到達時間以 Uber 顯示為準。</p></div>`);
       } catch (err) {
         show(`<div class="card err">${esc(err.message)}</div>`);
       }
+    }
+
+    async function planMode(from, to) {
+      const params = new URLSearchParams({ from: `${from.lat},${from.lng}`, to: `${to.lat},${to.lng}` });
+      if (state.mode === 'bus') return renderBus(await api('/api/bus?' + params), from, to);
+      if (state.mode === 'tra' || state.mode === 'thsr') {
+        return renderRail(await api(`/api/rail?system=${state.mode}&${params}`), from, to);
+      }
+      if (state.mode === 'scooter') {
+        // 填業者名稱是想找車，但車輛位置沒有公開資料，只能請使用者到 App 查
+        if (/goshare|gogoro|wemo|irent|威摩/i.test($('vehicle').value)) {
+          throw new Error('網站查不到共享機車的位置（業者沒有公開）。請在 GoShare／WeMo App 找到車後，把「車子停的地址」填在取車位置，或點地圖 →「設為取車位置」；不填也可以，會從出發點開始規劃。');
+        }
+        const vehicle = $('vehicle').value.trim() ? await resolve('vehicle') : null;
+        if (vehicle) params.set('vehicle', `${vehicle.lat},${vehicle.lng}`);
+        if (state.parking) params.set('parking', state.parking);
+        return renderScooter(await api('/api/scooter?' + params), from, to);
+      }
+      if (state.pickup) params.set('pickup', state.pickup);
+      if (state.dropoff) params.set('dropoff', state.dropoff);
+      if (/站/.test(from.name)) params.set('mrt', '1'); // 從車站出發 → 建議出口
+      render(await api('/api/plan?' + params), from, to);
     }
 
     // ---------- 轉彎說明 ----------
@@ -279,6 +290,23 @@
     // 「台北車站」本身就有站字；只有一個出口的站，TDX 編號為 0
     const stationName = (e) => (e.station.endsWith('站') ? e.station : e.station + '站');
     const exitNo = (e) => (e.exit === '0' ? '出口' : `${e.exit} 號出口`);
+
+    // Uber 叫車連結：手機有裝 App 會直接開 App，沒有就開網頁版；不給 from 就從目前位置上車
+    function uberLink(from, to) {
+      const q = new URLSearchParams({ action: 'setPickup' });
+      if (from) {
+        q.set('pickup[latitude]', from.lat);
+        q.set('pickup[longitude]', from.lng);
+        if (from.name) q.set('pickup[nickname]', from.name);
+      } else {
+        q.set('pickup', 'my_location');
+      }
+      q.set('dropoff[latitude]', to.lat);
+      q.set('dropoff[longitude]', to.lng);
+      if (to.name) q.set('dropoff[nickname]', to.name);
+      return 'https://m.uber.com/ul/?' + q;
+    }
+    const uberA = (from, to, text) => `<a class="uber" target="_blank" rel="noopener" href="${esc(uberLink(from, to))}">${text}</a>`;
 
     const GMODE = { foot: 'walking', bike: 'bicycling', bus: 'transit', train: 'transit', scooter: 'driving', taxi: 'driving' };
     const TRANSIT = new Set(['bus', 'train']); // 坐車的段：步驟是沿途各站
@@ -360,7 +388,8 @@
             <summary>${isTransit ? `沿途停靠站（${st.leg.stopCount} 站）` : `怎麼走（${st.leg.steps.length} 個步驟）`}</summary>
             <ol class="dirs" data-stage="${i}">${st.leg.steps.map((s) => `<li>${esc(stepText(s))}</li>`).join('')}</ol>
           </details>
-          <div class="links"><a target="_blank" rel="noopener" href="${gmaps(st.from, st.to, st.leg.mode)}">用 Google 地圖導航這段</a></div>
+          <div class="links"><a target="_blank" rel="noopener" href="${gmaps(st.from, st.to, st.leg.mode)}">用 Google 地圖導航這段</a>
+            ${st.leg.mode === 'taxi' ? uberA(st.from, st.to, '🚗 用 Uber 叫車') : ''}</div>
         </div></div>`;
     }
 
@@ -969,7 +998,9 @@
       const label = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
       const box = document.createElement('div');
       box.innerHTML = '<button data-k="from">設為出發點</button> <button data-k="to">設為目的地</button>' +
-        (state.mode === 'scooter' ? ' <button data-k="vehicle">設為取車位置</button>' : '');
+        (state.mode === 'scooter' ? ' <button data-k="vehicle">設為取車位置</button>' : '') +
+        `<br>${uberA(null, { lat, lng, name: '地圖選點' }, '🚗 Uber 叫車到這裡')}` +
+        (points.from ? ` ${uberA(points.from, { lat, lng, name: '地圖選點' }, '🚗 從出發點叫 Uber 到這裡')}` : '');
       box.addEventListener('click', (ev) => {
         const k = ev.target.dataset.k;
         if (!k) return;
