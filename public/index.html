@@ -480,7 +480,7 @@
               <span class="muted">・${TOOLS[l.mode]}${l.results[l.mode]?.duration != null ? ` 約 ${min(l.results[l.mode].duration)}` : ''}</span></div>
             <div class="modes">${Object.entries(l.results).map(([m, x]) => `
               <button type="button" data-leg="${i}" data-mode="${m}" class="${m === l.mode ? 'on' : ''}" ${x.duration == null ? 'disabled' : ''}
-                title="${esc(x.error || '')}">${TOOLS[m]} ${x.duration != null ? min(x.duration) : '不適用'}</button>`).join('')}</div>
+                title="${esc(x.error || '')}">${TOOLS[m]} ${x.duration != null ? min(x.duration) : '不適用'}${m === 'uber' && x.r ? `・$${uberFare(x.r.total.distance, x.r.total.duration).low}起` : ''}</button>`).join('')}</div>
           </div>`).join('')}
         ${legs.length > 1 ? '<p class="hint">點一段看詳細路線與導航；點工具可以換這段的交通方式。</p>' : ''}
       </div>`;
@@ -508,7 +508,9 @@
       const when = !$('whenRow').hidden && ($('date').value || $('time').value)
         ? `${$('date').value || '今天'} ${$('time').value}`.trim() : '';
       if (leg.mode !== 'uber') {
-        $('out').insertAdjacentHTML('beforeend', `<div class="card"><h2>🚗 這段不想轉乘？直接叫 Uber</h2>
+        // 沒有開車路線，用直線距離 × 1.3、時速 30 公里粗估車資
+        const d = dist(leg.from, leg.to) * 1.3;
+        $('out').insertAdjacentHTML('beforeend', `<div class="card"><h2>🚗 這段不想轉乘？直接叫 Uber（${fareText(uberFare(d, d / (30 / 3.6)))}）</h2>
           <div class="links">${uberA(leg.from, leg.to, `Uber：${esc(leg.from.name)} → ${esc(leg.to.name)}`)}</div>
           ${when ? `<p class="hint"><b>要 ${esc(when)} 搭車：</b>開啟後在 Uber App 按「預約」（Reserve）選時間，上下車地點會自動帶入。</p>` : ''}
           <p class="hint">會開啟 Uber App（沒裝則開網頁版），車資與到達時間以 Uber 顯示為準。</p></div>`);
@@ -671,6 +673,21 @@
         </div>`);
     }
 
+    // ---------- Uber 車資估算 ----------
+    // Uber 在北北基依政府計程車費率計價：起跳 1.25 公里 85 元、之後每 200 公尺 5 元、
+    // 低速（塞車、等紅燈）每 60 秒 5 元，夜間（23～6 點）加 20 元。低速時間抓行車時間的 1/4，
+    // 尖峰動態加價最多再抓 3 成；只是參考，實際以 Uber App 報價為準
+    const FARE = { start: 85, startM: 1250, stepM: 200, step: 5, slowMin: 5, slowShare: 0.25, night: 20, surge: 1.3 };
+    function uberFare(distanceM, durationS) {
+      const meter = FARE.start + Math.ceil(Math.max(0, distanceM - FARE.startM) / FARE.stepM) * FARE.step
+        + Math.floor((durationS / 60) * FARE.slowShare) * FARE.slowMin;
+      const h = new Date(Date.now() + 8 * 3600000).getUTCHours();
+      const low = meter + (h >= 23 || h < 6 ? FARE.night : 0);
+      return { low, high: Math.round((low * FARE.surge) / 5) * 5 };
+    }
+    const fareText = (f) => `約 $${f.low}～$${f.high}`;
+    const FARE_NOTE = '車資依北北基計程車費率估算（含塞車、夜間加成），尖峰可能更高，其他縣市費率不同，實際以 Uber App 報價為準。';
+
     // ---------- Uber（開車） ----------
     function renderDrive(p, from, to) {
       stopNav();
@@ -683,8 +700,9 @@
         <div class="card">
           <div class="muted">搭 Uber 約（不含等車）</div>
           <div class="big">${min(p.total.duration)}・${km(p.total.distance)}</div>
+          <div>💰 車資 <b>${fareText(uberFare(p.total.distance, p.total.duration))}</b></div>
           <div class="links" style="margin:8px 0">${uberA(from, to, `🚗 叫 Uber：${esc(from.name)} → ${esc(to.name)}`)}</div>
-          <p class="hint">上下車地點會自動帶入 Uber，登入後確認車型與車資即可。時間為一般路況估計，以 Uber 顯示為準。</p>
+          <p class="hint">上下車地點會自動帶入 Uber，登入後確認車型與車資即可。時間為一般路況估計。${FARE_NOTE}</p>
           ${leg.estimated ? '<p class="hint">※ 路線服務無回應，為直線距離估算</p>' : ''}
         </div>`);
     }
@@ -1055,7 +1073,9 @@
         <div class="muted">${a.alternatives ? `距離太遠不適合步行。${others ? `其他方式：${others}` : ''}` : '你選的接駁方式。'}
         ${a.kind === 'bus' && !inbound ? '<br>下車後的公車等車時間為估計值，出站時請再確認到站時間。' : ''}
         ${a.kind === 'youbike' ? `<br>借車站「${esc(a.pickup.name)}」可借 ${a.pickup.bikes} 台，還車站「${esc(a.dropoff.name)}」可還 ${a.dropoff.docks} 位（現在的數字）。` : ''}</div>
-        ${a.kind === 'taxi' || a.kind === 'uber' ? `<div class="links">${uberA(endOf(a.legs[0], false), endOf(a.legs[0], true), '🚗 用 Uber 叫車這段')}</div>` : ''}
+        ${a.kind === 'taxi' || a.kind === 'uber' ? `<div>💰 車資 <b>${fareText(uberFare(a.distance, a.duration))}</b></div>
+          <div class="links">${uberA(endOf(a.legs[0], false), endOf(a.legs[0], true), '🚗 用 Uber 叫車這段')}</div>
+          <p class="hint">${FARE_NOTE}</p>` : ''}
         ${a.kind === 'youbike' && a.pickups ? `
           <details><summary>換借車站（${from}附近有車的站）</summary>${bikeList(a.pickups, a.pickup.id, 'pickup')}</details>
           <details><summary>換還車站（${to}附近有空位的站，可以早點還車再走路）</summary>${bikeList(a.dropoffs, a.dropoff.id, 'dropoff')}</details>` : ''}
