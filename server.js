@@ -52,6 +52,8 @@ async function getStations() {
   const data = raw
     .map((s) => {
       const total = Number(s.parking_spaces) || 0;
+      // 所有車柱都被停用（forbidden_spaces = 總車柱）代表整站暫停，例如夜間系統維護
+      const paused = Number(s.status) !== 1 || (total > 0 && Number(s.forbidden_spaces) >= total);
       let bikes = Number(s.available_spaces) || 0;
       let docks = Number(s.empty_spaces) || 0;
       if (DEMO) {
@@ -68,7 +70,8 @@ async function getStations() {
         total,
         bikes,
         docks,
-        active: Number(s.status) === 1 || DEMO,
+        active: !paused || DEMO,
+        paused: paused && !DEMO,
         updatedAt: s.updated_at,
       };
     })
@@ -397,6 +400,7 @@ const ACCESS_WALK_M = 2500;      // 再遠就不建議走路到車站
 const ACCESS_BIKE_NEAR_M = 800;  // YouBike 借還車站要在這個距離內
 const TAXI_PREFER = 3;           // 公車／YouBike 比計程車慢超過 3 倍就建議搭計程車
 
+const PLAN_BIKE_NEAR_M = 1500;   // 全程騎 YouBike 時，借還車站最遠走多遠
 const SHORT_WALK_M = 400;         // 沒開步行時，這麼近還是走路
 const ACCESS_BIKE_PICK_M = 2000; // 使用者指定騎 YouBike 時，借還車站可以遠一點
 const BIKE_CHOICES = 5;          // 列出幾個借／還車站讓使用者換
@@ -519,6 +523,26 @@ app.get('/api/drive', wrap(async (req, res) => {
   res.json({ legs: [leg], total: { distance: leg.distance, duration: leg.duration } });
 }));
 
+// 地圖範圍內的 YouBike 站點與統計（bbox = 南,西,北,東），讓使用者看哪裡有車
+const MAX_BBOX_DEG = 0.25; // 範圍太大（地圖縮太小）就不回傳站點，只回統計
+app.get('/api/youbike', wrap(async (req, res) => {
+  const [s, w, n, e] = String(req.query.bbox || '').split(',').map(Number);
+  if (![s, w, n, e].every(Number.isFinite)) return res.status(400).json({ error: '請提供地圖範圍' });
+  const inside = (await getStations()).filter((x) => x.lat >= s && x.lat <= n && x.lng >= w && x.lng <= e);
+  const summary = {
+    stations: inside.length,
+    withBikes: inside.filter((x) => x.active && x.bikes > 0).length,
+    bikes: inside.reduce((t, x) => t + (x.active ? x.bikes : 0), 0),
+    paused: inside.filter((x) => x.paused).length,
+  };
+  const small = n - s <= MAX_BBOX_DEG && e - w <= MAX_BBOX_DEG;
+  res.json({
+    summary,
+    updatedAt: inside[0]?.updatedAt || null,
+    stations: small ? inside.map(({ id, name, lat, lng, bikes, docks, total, paused, address }) => ({ id, name, lat, lng, bikes, docks, total, paused, address })) : null,
+  });
+}));
+
 // 全程走路
 const MAX_WALK_M = 30000;
 app.get('/api/walk', wrap(async (req, res) => {
@@ -536,15 +560,19 @@ app.get('/api/plan', wrap(async (req, res) => {
   if (!from || !to) return res.status(400).json({ error: '請提供出發點與目的地' });
 
   const stations = await getStations();
-  const pickups = nearest(stations, from, (s) => s.active && s.bikes > 0, CANDIDATES);
-  const dropoffs = nearest(stations, to, (s) => s.active && s.docks > 0, CANDIDATES);
+  // 只找走得到的站：附近都沒車時（例如夜間暫停服務），不要跑去別的縣市借
+  const pickups = nearest(stations, from, (s) => s.active && s.bikes > 0, CANDIDATES).filter((s) => s.distance <= PLAN_BIKE_NEAR_M);
+  const dropoffs = nearest(stations, to, (s) => s.active && s.docks > 0, CANDIDATES).filter((s) => s.distance <= PLAN_BIKE_NEAR_M);
 
   if (!pickups.length || !dropoffs.length) {
-    const anyOpen = stations.some((s) => s.active && (s.bikes > 0 || s.docks > 0));
+    const near = (p) => nearest(stations, p, () => true, 50).filter((s) => s.distance <= PLAN_BIKE_NEAR_M);
+    const around = near(pickups.length ? to : from);
+    const paused = around.length && around.every((s) => s.paused);
+    const where = pickups.length ? '目的地' : '出發點';
     return res.status(404).json({
-      error: anyOpen
-        ? '附近找不到可借或可還的站點'
-        : 'YouBike 目前全面暫停服務（所有站點可借、可還皆為 0），可用 npm run demo 啟動示範模式',
+      error: !around.length ? `${where}附近 ${PLAN_BIKE_NEAR_M / 1000} 公里內沒有 YouBike 站`
+        : paused ? `${where}附近的 YouBike 目前暫停服務（可能是系統維護），請稍後再試或改用其他交通方式`
+        : `${where}附近 ${PLAN_BIKE_NEAR_M / 1000} 公里內的 YouBike 目前${pickups.length ? '都沒有空位可還' : '都沒有車可借'}`,
     });
   }
 

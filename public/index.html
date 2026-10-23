@@ -76,6 +76,11 @@
     .filters button { padding:4px 10px; font-size:13px; border-radius:999px; }
     .filters button.on { background:var(--fg); color:var(--bg); }
     .tabs button.on { background:var(--fg); color:var(--bg); border-color:var(--fg); font-weight:600; }
+    .bikeinfo { background:var(--card); color:var(--fg); padding:6px 9px; border-radius:8px; font-size:12px; line-height:1.5;
+                box-shadow:0 1px 4px rgba(0,0,0,.3); max-width:190px; }
+    .bikeinfo .legend { margin-top:3px; }
+    .bikeinfo .legend i { display:inline-block; width:9px; height:9px; border-radius:50%; margin:0 2px 0 4px; vertical-align:-1px; }
+    .bikeinfo .legend i:first-child { margin-left:0; }
     #trip { padding:0 16px; }
     #trip:empty { display:none; }
     .stop { margin-bottom:6px; align-items:center; }
@@ -285,6 +290,46 @@
           .bindPopup(box).addTo(metroStops);
       }
     }).catch(() => {});
+    // ---------- YouBike 站點：開啟 YouBike 時，地圖放大後顯示各站有沒有車 ----------
+    const bikeLayer = L.layerGroup();
+    const BIKE_ZOOM = 14;
+    const bikeColor = (s) => (s.paused ? '#9ca3af' : s.bikes >= 5 ? '#16a34a' : s.bikes > 0 ? '#f59e0b' : '#dc2626');
+    const bikeInfo = L.control({ position: 'topright' });
+    bikeInfo.onAdd = () => { const d = L.DomUtil.create('div', 'bikeinfo'); L.DomEvent.disableClickPropagation(d); return d; };
+    let bikeTimer = null, bikeReq = 0;
+
+    function refreshBikes() {
+      clearTimeout(bikeTimer);
+      if (!tools.has('bike')) return;
+      bikeTimer = setTimeout(async () => {
+        const b = map.getBounds();
+        const id = ++bikeReq;
+        try {
+          const r = await api('/api/youbike?bbox=' + [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].map((x) => x.toFixed(5)).join(','));
+          if (id !== bikeReq || !tools.has('bike')) return; // 已經有更新的請求
+          bikeLayer.clearLayers();
+          const zoomed = map.getZoom() >= BIKE_ZOOM && r.stations;
+          if (zoomed) {
+            for (const s of r.stations) {
+              const box = () => placeBox({ lat: s.lat, lng: s.lng, name: s.name }, `<b>🚲 ${esc(s.name)}</b><br>
+                ${s.paused ? '<span class="muted">暫停服務</span>' : `可借 <b class="${cls(s.bikes)}">${s.bikes}</b>・可還 <b>${s.docks}</b>`}
+                <span class="muted">／共 ${s.total} 柱</span><br><span class="muted">${esc(s.address)}</span><br>`);
+              L.circleMarker([s.lat, s.lng], { radius: 6, color: '#fff', weight: 1.5, fillColor: bikeColor(s), fillOpacity: 0.95 })
+                .bindPopup(box).addTo(bikeLayer);
+            }
+          }
+          const m = r.summary;
+          const allPaused = m.stations && m.paused === m.stations;
+          bikeInfo.getContainer().innerHTML = `<b>🚲 畫面內 YouBike</b><br>
+            ${m.stations ? `${m.withBikes}／${m.stations} 站有車・共 ${m.bikes} 台${m.paused ? `<br><span class="low">${allPaused ? '全部' : m.paused + ' 站'}暫停服務</span>` : ''}` : '這裡沒有站點'}
+            ${zoomed ? `<div class="legend"><i style="background:#16a34a"></i>5 台以上 <i style="background:#f59e0b"></i>1～4 台
+              <i style="background:#dc2626"></i>沒車 <i style="background:#9ca3af"></i>暫停</div>` : '<br><span class="muted">放大地圖可看各站</span>'}
+            ${r.updatedAt ? `<div class="muted">更新 ${esc(String(r.updatedAt).slice(11, 16))}</div>` : ''}`;
+        } catch { /* YouBike 資料暫時抓不到，下次移動地圖再試 */ }
+      }, 300);
+    }
+    map.on('moveend', refreshBikes);
+
     // 地圖只顯示有開啟的交通工具，表單也只顯示用得到的欄位
     function applyTools() {
       for (const b of $('tools').children) b.classList.toggle('on', tools.has(b.dataset.tool));
@@ -292,6 +337,9 @@
       show(metroLines, tools.has('metro'));
       show(metroStops, tools.has('metro') && map.getZoom() >= METRO_STOP_ZOOM);
       show(stationLayer, tools.has('thsr'));
+      show(bikeLayer, tools.has('bike'));
+      if (tools.has('bike')) { if (!bikeInfo.getContainer()?.isConnected) bikeInfo.addTo(map); refreshBikes(); }
+      else bikeInfo.remove();
       $('vehicleRow').hidden = !tools.has('scooter');
       $('whenRow').hidden = !tools.has('tra') && !tools.has('thsr');
     }
@@ -507,6 +555,7 @@
       } else {
         RENDER[leg.mode](res.r, leg.from, leg.to);
       }
+      bikeNotice(leg);
       // 每段的結果下面都可以直接叫車；選了日期時間時，Uber 連結帶不了時間，提醒在 App 裡預約
       const when = !$('whenRow').hidden && ($('date').value || $('time').value)
         ? `${$('date').value || '今天'} ${$('time').value}`.trim() : '';
@@ -518,6 +567,19 @@
           ${when ? `<p class="hint"><b>要 ${esc(when)} 搭車：</b>開啟後在 Uber App 按「預約」（Reserve）選時間，上下車地點會自動帶入。</p>` : ''}
           <p class="hint">會開啟 Uber App（沒裝則開網頁版），車資與到達時間以 Uber 顯示為準。</p></div>`);
       }
+    }
+
+    // 開了 YouBike 但這段的起點附近 1 公里內都沒車（例如夜間暫停服務）：說明為什麼沒安排騎車
+    async function bikeNotice(leg) {
+      if (!tools.has('bike')) return;
+      const dLat = 0.009, dLng = 0.01; // 約 1 公里
+      try {
+        const { summary: m } = await api('/api/youbike?bbox=' + [leg.from.lat - dLat, leg.from.lng - dLng, leg.from.lat + dLat, leg.from.lng + dLng].join(','));
+        if (!m.stations || m.withBikes > 0 || trip.legs[trip.sel] !== leg) return;
+        $('out').insertAdjacentHTML('afterbegin', `<div class="card demo">🚲 ${leg.index === 0 ? '出發點' : esc(leg.from.name)}附近 1 公里內的
+          ${m.stations} 個 YouBike 站目前都沒有車可借${m.paused ? `（${m.paused === m.stations ? '全部' : m.paused + ' 站'}暫停服務，可能是系統維護）` : ''}，
+          所以沒有安排騎車。地圖右上角可以看哪裡有車。</div>`);
+      } catch { /* 查不到就不顯示 */ }
     }
 
     // 使用者在詳細結果裡換了借還車站、上下車站等：只重新規劃目前這段
