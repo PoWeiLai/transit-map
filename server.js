@@ -328,19 +328,25 @@ async function bikeAccess(from, to, pref, maxM) {
 }
 
 // 自動選：近就走路；遠的話先用直線估算比較公車、YouBike、計程車，
-// 選定後再由 refine 換成實際路線，避免每個候選車站都呼叫路線服務
-async function autoAccess(from, to) {
+// 選定後再由 refine 換成實際路線，避免每個候選車站都呼叫路線服務。
+// allow：使用者開啟的交通工具（youbike／bus／uber），沒給就全部可用；都不能用時只好走路
+async function autoAccess(from, to, allow) {
+  const ok = (k) => !allow || allow.has(k);
   if (distance(from, to) <= ACCESS_WALK_M) return { kind: 'walk', ...summarize([await route('foot', from, to)]) };
 
   const [bus, bike] = await Promise.all([
-    planBus(from, to, estimateRoute).then((list) => list[0]).catch(() => null),
-    bikeAccess(from, to, {}, ACCESS_BIKE_NEAR_M).catch(() => null),
+    ok('bus') && planBus(from, to, estimateRoute).then((list) => list[0]).catch(() => null),
+    ok('youbike') && bikeAccess(from, to, {}, ACCESS_BIKE_NEAR_M).catch(() => null),
   ]);
   const candidates = [
     bus && { kind: 'bus', ...summarize(bus.legs, bus.total.duration) },
     bike,
   ].filter(Boolean).sort((a, b) => a.duration - b.duration);
-  const taxi = { kind: 'taxi', ...summarize([estimateRoute('taxi', from, to)]) };
+  if (!ok('uber')) {
+    if (!candidates.length) return { kind: 'walk', ...summarize([estimateRoute('foot', from, to)]) };
+    return { ...candidates[0], alternatives: candidates.map(({ kind, duration }) => ({ kind, duration })) };
+  }
+  const taxi = { kind: allow ? 'uber' : 'taxi', ...summarize([estimateRoute('taxi', from, to)]) };
   const pick = candidates[0] && candidates[0].duration <= taxi.duration * TAXI_PREFER ? candidates[0] : taxi;
   const alternatives = [...candidates, taxi].map(({ kind, duration }) => ({ kind, duration }));
   return { ...pick, alternatives };
@@ -362,7 +368,7 @@ function makeConnect(pref = {}) {
       const bus = await planBus(from, to, estimateRoute).then((list) => list[0]).catch(() => null);
       if (bus) return { kind: 'bus', ...summarize(bus.legs, bus.total.duration) };
     }
-    const auto = await autoAccess(from, to);
+    const auto = await autoAccess(from, to, pref.allow);
     return kind === 'auto' ? auto : { ...auto, fallback: kind };
   };
   connect.refine = refineAccess;
@@ -370,10 +376,14 @@ function makeConnect(pref = {}) {
 }
 
 // 規劃 API 的接駁參數：access／egress 是到車站、出站後的方式，inPickup 等是使用者選的 YouBike 站
-const accessPrefs = (q) => ({
-  in: makeConnect({ kind: q.access, pickup: q.inPickup, dropoff: q.inDropoff }),
-  out: makeConnect({ kind: q.egress, pickup: q.outPickup, dropoff: q.outDropoff }),
-});
+// allow：使用者開啟的交通工具，自動選接駁時只從這些裡面挑
+const accessPrefs = (q) => {
+  const allow = q.allow != null ? new Set(String(q.allow).split(',')) : null;
+  return {
+    in: makeConnect({ kind: q.access, pickup: q.inPickup, dropoff: q.inDropoff, allow }),
+    out: makeConnect({ kind: q.egress, pickup: q.outPickup, dropoff: q.outDropoff, allow }),
+  };
+};
 
 function summarize(legs, duration = legs.reduce((n, l) => n + l.duration, 0)) {
   return { legs, duration: Math.round(duration), distance: legs.reduce((n, l) => n + l.distance, 0) };
@@ -407,6 +417,15 @@ app.get('/api/geocode', wrap(async (req, res) => {
 }));
 
 // 規劃：出發點 → 步行到最近有車的站 → 騎到離目的地最近有空位的站 → 步行到目的地
+// 開車（叫 Uber）：路線與時間用汽車路線估算
+app.get('/api/drive', wrap(async (req, res) => {
+  const from = parsePoint(req.query.from);
+  const to = parsePoint(req.query.to);
+  if (!from || !to) return res.status(400).json({ error: '請提供出發點與目的地' });
+  const leg = { ...(await route('scooter', from, to)), mode: 'taxi' };
+  res.json({ legs: [leg], total: { distance: leg.distance, duration: leg.duration } });
+}));
+
 // 全程走路
 const MAX_WALK_M = 30000;
 app.get('/api/walk', wrap(async (req, res) => {
