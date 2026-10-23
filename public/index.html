@@ -132,6 +132,13 @@
           <a target="_blank" rel="noopener" href="https://www.wemoscooter.com/">🛵 開啟 WeMo</a>
         </div>
       </div>
+      <div id="whenRow" hidden>
+        <div class="row">
+          <div style="flex:1"><label for="date">乘車日期</label><input id="date" type="date" /></div>
+          <div style="flex:1"><label for="time">出發時間</label><input id="time" type="time" /></div>
+        </div>
+        <p class="ex">列出這個時間之後的班次・不填就是現在 <button type="button" id="whenNow">改回現在</button></p>
+      </div>
       <div>
         <label for="to">目的地</label>
         <input id="to" placeholder="輸入地址或地標" />
@@ -225,9 +232,12 @@
       try {
         const [from, to] = [await resolve('from'), await resolve('to')];
         await planMode(from, to);
-        // 每種交通方式的結果下面都可以直接叫車
+        // 每種交通方式的結果下面都可以直接叫車；選了日期時間時，Uber 連結帶不了時間，提醒在 App 裡預約
+        const when = !$('whenRow').hidden && ($('date').value || $('time').value)
+          ? `${$('date').value || '今天'} ${$('time').value}`.trim() : '';
         $('out').insertAdjacentHTML('beforeend', `<div class="card"><h2>🚗 不想轉乘？直接叫 Uber</h2>
           <div class="links">${uberA(from, to, `Uber：${esc(from.name)} → ${esc(to.name)}`)}</div>
+          ${when ? `<p class="hint"><b>要 ${esc(when)} 搭車：</b>開啟後在 Uber App 按「預約」（Reserve）選時間，上下車地點會自動帶入。</p>` : ''}
           <p class="hint">會開啟 Uber App（沒裝則開網頁版），車資與到達時間以 Uber 顯示為準。</p></div>`);
       } catch (err) {
         show(`<div class="card err">${esc(err.message)}</div>`);
@@ -238,6 +248,8 @@
       const params = new URLSearchParams({ from: `${from.lat},${from.lng}`, to: `${to.lat},${to.lng}` });
       if (state.mode === 'bus') return renderBus(await api('/api/bus?' + params), from, to);
       if (state.mode === 'tra' || state.mode === 'thsr') {
+        if ($('date').value) params.set('date', $('date').value);
+        if ($('time').value) params.set('time', $('time').value);
         return renderRail(await api(`/api/rail?system=${state.mode}&${params}`), from, to);
       }
       if (state.mode === 'scooter') {
@@ -528,7 +540,7 @@
       if (!r.trains.length) {
         stopNav();
         layer.clearLayers();
-        return show(`<div class="card err">今天接下來沒有可以搭的${esc(r.label)}班次
+        return show(`<div class="card err">${r.today && !$('time').value ? '今天接下來' : `${esc(r.date)} ${hhmm(r.now.minutes)} 之後`}沒有可以搭的${esc(r.label)}班次
           （${esc(r.origins.map((s) => s.name).join('、'))} → ${esc(r.dests.map((s) => s.name).join('、'))}）。
           ${r.suspendedCount ? `<br><b>有 ${r.suspendedCount} 班因停駛取消</b>，請留意台鐵公告。` : ''}</div>`);
       }
@@ -574,7 +586,7 @@
         ${visible.length ? visible.map(([x, i]) => `
           <div class="card opt ${i === idx ? 'sel' : ''}" data-train="${i}">
             <div class="chips">${trainChip(x)} <b>${esc(x.dep)} → ${esc(x.arr)}</b> ${delay(x)}
-              ${x.seats ? seatHtml(x.seats) : r.system === 'thsr' ? '<span class="muted">座位：無資料</span>' : ''}</div>
+              ${x.seats ? seatHtml(x.seats) : r.system === 'thsr' && r.today ? '<span class="muted">座位：無資料</span>' : ''}</div>
             <div class="muted">${esc(x.origin.name)} → ${esc(x.dest.name)}・${x.minutes} 分・停 ${x.stopCount} 站${x.fare?.full.standard ? `・標準 ${price(x.fare.full.standard)}` : ''}・抵達目的地約 ${hhmm(x.reach)}</div>
           </div>`).join('') : '<div class="card muted">這個車種接下來沒有班次</div>'}
         ${accessCard(t.walkIn, `到${t.origin.name}站`, true)}
@@ -587,7 +599,9 @@
         </div>
         ${accessCard(t.walkOut, `從${t.dest.name}站到目的地`, false)}
         ${fareCard(t)}
-        <p class="hint">時刻來自交通部 TDX，依抵達目的地時間排序。${r.system === 'tra' ? '誤點資訊每 2 分鐘更新。' : '剩餘座位每 5 分鐘更新。'}</p>
+        <p class="hint">${esc(r.date)} 的時刻，來自交通部 TDX，依抵達目的地時間排序。${!r.today
+          ? `${r.system === 'tra' ? '誤點' : '剩餘座位'}只有當天才查得到；接駁的公車、YouBike 是現在的狀況，僅供參考。`
+          : r.system === 'tra' ? '誤點資訊每 2 分鐘更新。' : '剩餘座位每 5 分鐘更新。'}</p>
       `);
     }
 
@@ -969,10 +983,23 @@
       state.mode = mode;
       for (const b of $('tabs').children) b.classList.toggle('on', b.dataset.mode === mode);
       $('vehicleRow').hidden = mode !== 'scooter';
+      $('whenRow').hidden = mode !== 'tra' && mode !== 'thsr';
       if (points.from && points.to || $('from').value && $('to').value) {
         resetChoices();
         plan();
       }
+    });
+
+    // 乘車日期：今天起 30 天內（台灣時間）
+    {
+      const day = (n) => new Date(Date.now() + 8 * 3600000 + n * 86400000).toISOString().slice(0, 10);
+      $('date').min = day(0);
+      $('date').max = day(30);
+      $('date').placeholder = day(0);
+    }
+    $('whenNow').addEventListener('click', () => {
+      $('date').value = $('time').value = '';
+      if (points.from && points.to || $('from').value && $('to').value) plan();
     });
 
     $('form').addEventListener('submit', (e) => {

@@ -13,6 +13,16 @@ function traType(name) {
   return name.replace(/\(.*$/, '');
 }
 
+// 今天用 Today 的時刻表；其他日期用指定日期的時刻表（檔名帶日期，同樣每天重抓一次，以免時刻異動）
+async function timetable(date, name, todayPath, datePath) {
+  if (date === taipeiNow().date) return daily(name, () => tdx(todayPath));
+  try {
+    return await daily(`${name}-for-${date}`, () => tdx(datePath));
+  } catch {
+    throw new Error(`查不到 ${date} 的時刻表（可能還沒公布）`);
+  }
+}
+
 const SYSTEMS = {
   tra: {
     label: '台鐵',
@@ -23,8 +33,9 @@ const SYSTEMS = {
         lat: s.StationPosition.PositionLat, lng: s.StationPosition.PositionLon,
       }));
     },
-    async trains() {
-      const { TrainTimetables } = await daily('tra-timetable', () => tdx('v3/Rail/TRA/DailyTrainTimetable/Today'));
+    async trains(date) {
+      const { TrainTimetables } = await timetable(date, 'tra-timetable',
+        'v3/Rail/TRA/DailyTrainTimetable/Today', `v3/Rail/TRA/DailyTrainTimetable/TrainDate/${date}`);
       // SuspendedFlag：0 正常、1 停駛、2 部分停駛（個別車站另有標記）
       return TrainTimetables.map((t) => ({
         no: t.TrainInfo.TrainNo,
@@ -56,8 +67,9 @@ const SYSTEMS = {
         lat: s.StationPosition.PositionLat, lng: s.StationPosition.PositionLon,
       }));
     },
-    async trains() {
-      const list = await daily('thsr-timetable', () => tdx('v2/Rail/THSR/DailyTimetable/Today'));
+    async trains(date) {
+      const list = await timetable(date, 'thsr-timetable',
+        'v2/Rail/THSR/DailyTimetable/Today', `v2/Rail/THSR/DailyTimetable/TrainDate/${date}`);
       return list.map((t) => ({
         no: t.DailyTrainInfo.TrainNo,
         type: '高鐵',
@@ -117,7 +129,8 @@ function nearbyStations(stations, point) {
 
 // connect(from, to) 規劃到車站／離開車站的接駁（步行、公車、YouBike、計程車），
 // 太遠時先回傳估算的路線；connect.refine(access) 再換成實際路線，只對最後列出的班次做
-export async function planRail(system, from, to, connect) {
+// when = { date: 'YYYY-MM-DD', minutes: 當天第幾分鐘 }：列出這個時間之後的班次，預設現在
+export async function planRail(system, from, to, connect, when = taipeiNow()) {
   const sys = SYSTEMS[system];
   if (!sys) throw new Error('未知的鐵路系統');
   const stations = await sys.stations();
@@ -125,15 +138,16 @@ export async function planRail(system, from, to, connect) {
   const dests = nearbyStations(stations, to).filter((d) => !origins.some((o) => o.id === d.id));
   if (!dests.length) throw new Error(`出發點和目的地附近是同一個${sys.label}車站「${origins[0].name}」，不需要搭${sys.label}`);
 
+  const today = when.date === taipeiNow().date; // 誤點、剩餘座位只有今天的資料
   const [trains, delays, walkIns, walkOuts, fares] = await Promise.all([
-    sys.trains(),
-    sys.delays(),
+    sys.trains(when.date),
+    today ? sys.delays() : new Map(),
     Promise.all(origins.map((o) => connect(from, o))),
     Promise.all(dests.map((d) => connect(d, to))),
     sys.fares?.().catch(() => null), // 票價只是參考，抓不到照樣規劃
   ]);
   const byId = new Map(stations.map((s) => [s.id, s]));
-  const now = taipeiNow().minutes;
+  const now = when.minutes;
 
   const options = [];
   let suspendedCount = 0;
@@ -216,7 +230,7 @@ export async function planRail(system, from, to, connect) {
   };
   const seatsBy = new Map();
   const seatsAt = (id) => {
-    if (!seatsBy.has(id)) seatsBy.set(id, sys.seats ? sys.seats(id) : Promise.resolve(new Map()));
+    if (!seatsBy.has(id)) seatsBy.set(id, sys.seats && today ? sys.seats(id) : Promise.resolve(new Map()));
     return seatsBy.get(id);
   };
   await Promise.all(shown.map(async (o) => {
@@ -230,9 +244,11 @@ export async function planRail(system, from, to, connect) {
     system, label: sys.label, origins, dests,
     trains: shown,
     suspendedCount,
-    now: taipeiNow(),
+    date: when.date,
+    today,
+    now: when,
   };
 }
 
 // 啟動時先把今天的時刻表載入（若硬碟已有就不會呼叫 TDX）
-export const warmUp = () => Promise.all(Object.values(SYSTEMS).flatMap((s) => [s.stations(), s.trains(), s.fares?.()]));
+export const warmUp = () => Promise.all(Object.values(SYSTEMS).flatMap((s) => [s.stations(), s.trains(taipeiNow().date), s.fares?.()]));

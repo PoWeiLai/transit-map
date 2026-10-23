@@ -4,7 +4,7 @@ import { distance } from './geo.js';
 import { planBus, nearbyArrivals, warmUp } from './bus.js';
 import { nearbyParking, warmUp as warmUpParking } from './scooter.js';
 import { planRail, railStations, warmUp as warmUpRail } from './rail.js';
-import { hasTdx } from './tdx.js';
+import { hasTdx, taipeiNow } from './tdx.js';
 
 // TDX 金鑰等設定放在 .env（不進版控）
 try { process.loadEnvFile(); } catch { /* 沒有 .env 也能跑 */ }
@@ -473,8 +473,23 @@ app.get('/api/rail', wrap(async (req, res) => {
   const to = parsePoint(req.query.to);
   if (!from || !to) return res.status(400).json({ error: '請提供出發點與目的地' });
   if (!hasTdx()) return res.status(503).json({ error: '伺服器尚未設定 TDX 金鑰，無法查詢火車時刻' });
-  res.json(await planRail(req.query.system === 'thsr' ? 'thsr' : 'tra', from, to, connectRail));
+  const when = parseWhen(req.query.date, req.query.time);
+  if (when.error) return res.status(400).json({ error: when.error });
+  res.json(await planRail(req.query.system === 'thsr' ? 'thsr' : 'tra', from, to, connectRail, when));
 }));
+
+// 乘車日期（YYYY-MM-DD）與出發時間（HH:MM）；沒填日期就是現在，其他日期沒填時間就從頭班車列起
+const MAX_DAYS_AHEAD = 30;
+function parseWhen(date, time) {
+  const now = taipeiNow();
+  if (!date) return now;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { error: '日期格式不正確' };
+  const days = (Date.parse(date) - Date.parse(now.date)) / 86400000;
+  if (!(days >= 0 && days <= MAX_DAYS_AHEAD)) return { error: `只能查今天起 ${MAX_DAYS_AHEAD} 天內的班次` };
+  const m = /^(\d{1,2}):(\d{2})$/.exec(time || '');
+  const minutes = m ? Number(m[1]) * 60 + Number(m[2]) : date === now.date ? now.minutes : 0;
+  return { date, minutes };
+}
 
 // 車站位置（地圖上標示高鐵站用）
 app.get('/api/rail/stations', wrap(async (req, res) => {
