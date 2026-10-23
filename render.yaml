@@ -1,0 +1,18 @@
+# Render 部署設定。到 Render 按 New → Blueprint → 選這個 repo，會自動照這份建立服務。
+services:
+  - type: web
+    name: transit-map
+    runtime: node
+    plan: free          # 免費方案：15 分鐘沒流量會休眠，喚醒約 1 分鐘，且沒有永久硬碟
+    region: singapore   # Render 沒有台灣機房，新加坡離台灣最近
+    buildCommand: npm ci
+    startCommand: npm start
+    envVars:
+      # 交通部 TDX 金鑰（台鐵、高鐵時刻要用）。這個 repo 是公開的，所以金鑰不寫在檔案裡：
+      # 建 Blueprint 時 Render 會問，或到服務的 Environment 頁手動加。
+      # 金鑰在 https://tdx.transportdata.tw → 會員中心 → 資料服務 → API 金鑰。
+      - key: TDX_CLIENT_ID
+        sync: false
+      - key: TDX_CLIENT_SECRET
+        sync: false
+      # 時刻表一天抓一次存在 data/cache；免費方案沒有永久硬碟，重開機後會重抓（只要 4 次請求）。

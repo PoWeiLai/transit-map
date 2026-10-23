@@ -1,0 +1,888 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>公共交通地圖</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    :root { --fg:#1f2328; --muted:#6b7280; --bg:#f6f7f9; --card:#fff; --line:#e5e7eb;
+            --accent:#f5a000; --ok:#16a34a; --warn:#dc2626; --walk:#2563eb; --bike:#f5a000; }
+    @media (prefers-color-scheme: dark) {
+      :root { --fg:#e6e6e6; --muted:#9ca3af; --bg:#15171a; --card:#1f2226; --line:#33373d; }
+    }
+    * { box-sizing: border-box; }
+    html, body { height:100%; margin:0; }
+    body { font-family: system-ui, "Noto Sans TC", sans-serif; background:var(--bg); color:var(--fg);
+           display:grid; grid-template-columns: 380px 1fr; }
+    aside { overflow-y:auto; border-right:1px solid var(--line); display:flex; flex-direction:column; }
+    header { padding:14px 16px; background:var(--accent); color:#fff; }
+    h1 { margin:0; font-size:18px; }
+    #map { height:100%; }
+    form { padding:16px; display:grid; gap:10px; }
+    label { display:block; margin-bottom:4px; font-size:13px; color:var(--muted); }
+    .row { display:flex; gap:6px; }
+    .ex { margin:6px 0 0; font-size:12px; color:var(--muted); display:flex; flex-wrap:wrap; align-items:center; gap:4px; }
+    .ex button { padding:2px 8px; font-size:12px; border-radius:999px; }
+    input { box-sizing:border-box; width:100%; flex:1; min-width:0; padding:9px 10px; font-size:15px; border-radius:8px; border:1px solid var(--line);
+            background:var(--card); color:var(--fg); }
+    button { padding:9px 12px; font-size:15px; border-radius:8px; border:1px solid var(--line);
+             background:var(--card); color:var(--fg); cursor:pointer; white-space:nowrap; }
+    button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+    .hint { font-size:12px; color:var(--muted); margin:0; }
+    #out { padding:0 16px 16px; display:grid; gap:12px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+    .card h2 { font-size:15px; margin:0 0 8px; }
+    .err { border-color:var(--warn); color:var(--warn); }
+    .demo { background:#fff7e6; color:#8a5a00; border-color:#f5d08a; }
+    .step { display:flex; gap:10px; padding:6px 0; border-top:1px dashed var(--line); }
+    .step:first-of-type { border-top:0; }
+    .icon { font-size:20px; width:26px; text-align:center; }
+    .muted { color:var(--muted); font-size:13px; }
+    .big { font-size:22px; font-weight:700; }
+    .alt { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 0;
+           border-top:1px solid var(--line); font-size:14px; cursor:pointer; }
+    .alt.sel { font-weight:700; }
+    .alt:hover { color:var(--accent); }
+    .low { color:var(--warn); } .good { color:var(--ok); }
+    .dirs { margin:6px 0 0; padding-left:20px; font-size:13px; line-height:1.6; }
+    .dirs li.now { font-weight:700; color:var(--accent); }
+    .links { display:flex; gap:6px; margin-top:6px; }
+    .links a { font-size:12px; padding:3px 8px; border:1px solid var(--line); border-radius:6px; text-decoration:none; color:var(--fg); }
+    details summary { cursor:pointer; font-size:13px; color:var(--muted); margin-top:4px; }
+    #nav { display:none; position:sticky; top:0; z-index:5; background:#1f2937; color:#fff; padding:14px 16px; }
+    #nav.on { display:block; }
+    #nav .stage { font-size:13px; opacity:.8; }
+    #nav .instr { font-size:20px; font-weight:700; margin:4px 0; }
+    #nav .rest { font-size:13px; opacity:.8; }
+    #nav .notice { background:#f5a000; color:#000; border-radius:8px; padding:8px 10px; margin-top:8px; font-weight:700; }
+    #nav button { margin-top:8px; background:transparent; color:#fff; border-color:#6b7280; font-size:13px; padding:5px 10px; }
+    .navbtns { display:flex; gap:6px; }
+    .navbtns button { flex:1; }
+    .me { position:relative; width:40px; height:40px; }
+    .me .dot { position:absolute; left:11px; top:11px; width:18px; height:18px; border-radius:50%;
+               background:#2563eb; border:3px solid #fff; box-shadow:0 0 0 2px rgba(37,99,235,.4); }
+    .me .cone { position:absolute; left:12px; top:-4px; width:0; height:0; border-left:8px solid transparent;
+                border-right:8px solid transparent; border-bottom:18px solid rgba(37,99,235,.55); }
+    #nav .dir { display:flex; align-items:center; gap:10px; margin-top:6px; }
+    #navArrow { display:inline-block; font-size:30px; line-height:1; transition:transform .3s; }
+    #navDir { font-size:15px; font-weight:600; }
+    .tabs { display:flex; flex-wrap:wrap; gap:6px; }
+    .tabs button { flex:1 1 30%; padding:8px 6px; }
+    .chip.tra { background:#0f766e; } .chip.fast { background:#b91c1c; } .chip.hsr { background:#ea580c; }
+    .filters { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; }
+    .filters button { padding:4px 10px; font-size:13px; border-radius:999px; }
+    .filters button.on { background:var(--fg); color:var(--bg); }
+    .tabs button.on { background:var(--fg); color:var(--bg); border-color:var(--fg); font-weight:600; }
+    .opt { cursor:pointer; }
+    .opt.sel { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent); }
+    .chips { display:flex; flex-wrap:wrap; align-items:center; gap:4px; margin:4px 0; }
+    .chip { background:#16a34a; color:#fff; border-radius:6px; padding:1px 7px; font-weight:700; font-size:14px; }
+    .chip.walk { background:transparent; color:var(--muted); font-weight:400; padding:0; }
+    .eta-now { color:var(--ok); font-weight:700; }
+    .pin { border-radius:50%; border:2px solid #fff; box-shadow:0 0 3px rgba(0,0,0,.5);
+           color:#fff; font:700 11px/20px system-ui; text-align:center; }
+    @media (max-width: 760px) {
+      body { grid-template-columns: 1fr; grid-template-rows: auto 45vh; }
+      aside { border-right:0; order:1; }
+      #map { order:0; height:45vh; }
+    }
+  </style>
+</head>
+<body>
+  <aside>
+    <header><h1>🗺️ 公共交通地圖</h1></header>
+    <div id="nav">
+      <div class="stage" id="navStage"></div>
+      <div class="instr" id="navInstr"></div>
+      <div class="dir"><span id="navArrow">⬆</span><span id="navDir"></span></div>
+      <div class="rest" id="navRest"></div>
+      <div class="notice" id="navNotice" hidden></div>
+      <button type="button" id="navStop">結束導航</button>
+    </div>
+    <form id="form">
+      <div class="tabs" id="tabs">
+        <button type="button" data-mode="bike" class="on">🚲 YouBike</button>
+        <button type="button" data-mode="bus">🚌 公車</button>
+        <button type="button" data-mode="scooter">🛵 共享機車</button>
+        <button type="button" data-mode="tra">🚆 台鐵</button>
+        <button type="button" data-mode="thsr">🚄 高鐵</button>
+      </div>
+      <div>
+        <label for="from">出發點</label>
+        <div class="row">
+          <input id="from" placeholder="輸入捷運站或地點" />
+          <button type="button" id="locate" title="使用目前位置">📍</button>
+        </div>
+        <p class="ex" data-for="from">例如：<button type="button">捷運科技大樓站</button><button type="button">台北車站</button><button type="button">板橋車站</button>・按 📍 用目前位置</p>
+      </div>
+      <div id="vehicleRow" hidden>
+        <label for="vehicle">取車位置（選填）：先在 GoShare／WeMo App 找到車，再填車子停的地址</label>
+        <input id="vehicle" placeholder="車子停的地址，或點地圖 →「設為取車位置」" />
+        <p class="ex" data-for="vehicle">例如：<button type="button">信義路五段7號</button><button type="button">忠孝東路四段1號</button>・不填就從出發點開始騎</p>
+        <div class="links">找車：
+          <a target="_blank" rel="noopener" href="https://www.ridegoshare.com/">🛵 開啟 GoShare</a>
+          <a target="_blank" rel="noopener" href="https://www.wemoscooter.com/">🛵 開啟 WeMo</a>
+        </div>
+      </div>
+      <div>
+        <label for="to">目的地</label>
+        <input id="to" placeholder="輸入地址或地標" />
+        <p class="ex" data-for="to">例如：<button type="button">台北101</button><button type="button">亞東醫院</button><button type="button">國立故宮博物院</button><button type="button">華山1914文化創意產業園區</button></p>
+      </div>
+      <button class="primary" type="submit">規劃路線</button>
+      <p class="hint">也可以直接點地圖設定出發點或目的地。</p>
+    </form>
+    <div id="out"></div>
+  </aside>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+    const km = (m) => (m >= 1000 ? (m / 1000).toFixed(1) + ' 公里' : m + ' 公尺');
+    const min = (s) => Math.max(1, Math.round(s / 60)) + ' 分鐘';
+    const cls = (n) => (n <= 2 ? 'low' : n >= 5 ? 'good' : '');
+
+    const map = L.map('map').setView([25.0418, 121.5436], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '&copy; OpenStreetMap',
+    }).addTo(map);
+    const layer = L.layerGroup().addTo(map);
+
+    // 已確認的座標；使用者改了文字就清掉，重新查詢
+    const points = { from: null, to: null, vehicle: null };
+    const state = { mode: 'bike', pickup: null, dropoff: null, parking: null };
+    for (const k of ['from', 'to', 'vehicle']) $(k).addEventListener('input', () => { points[k] = null; });
+    const resetChoices = () => { state.pickup = state.dropoff = state.parking = null; };
+
+    const pin = (color, text) => L.divIcon({
+      className: '', iconSize: [24, 24], iconAnchor: [12, 12],
+      html: `<div class="pin" style="background:${color};width:24px;height:24px;line-height:20px">${text}</div>`,
+    });
+
+    // 小螢幕時結果在地圖下方，要捲過去才看得到
+    function show(html) {
+      $('out').innerHTML = html;
+      $('out').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function currentPosition() {
+      return new Promise((resolve, reject) => {
+        if (!navigator.geolocation) return reject(new Error('瀏覽器不支援定位'));
+        navigator.geolocation.getCurrentPosition(
+          ({ coords }) => resolve({ lat: coords.latitude, lng: coords.longitude, name: '目前位置' }),
+          () => reject(new Error('無法取得目前位置，請允許瀏覽器定位，或改輸入地點')),
+          { enableHighAccuracy: true, timeout: 10000 },
+        );
+      });
+    }
+
+    async function api(url) {
+      const res = await fetch(url);
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || res.statusText);
+      return body;
+    }
+
+    async function resolve(key) {
+      if (points[key]) return points[key];
+      // 「目前位置」不是地址：重新整理後座標會遺失，要重新定位
+      if ($(key).value.trim() === '目前位置') return (points[key] = await currentPosition());
+      const q = $(key).value.trim();
+      if (!q) throw new Error({ from: '請輸入出發點', to: '請輸入目的地', vehicle: '請輸入取車位置' }[key]);
+      const results = await api('/api/geocode?q=' + encodeURIComponent(q));
+      if (!results.length) throw new Error(`找不到「${q}」，請換個說法或直接點地圖`);
+      points[key] = results[0];
+      return results[0];
+    }
+
+    async function plan() {
+      show('<div class="card muted">規劃中…</div>');
+      try {
+        const [from, to] = [await resolve('from'), await resolve('to')];
+        const params = new URLSearchParams({ from: `${from.lat},${from.lng}`, to: `${to.lat},${to.lng}` });
+        if (state.mode === 'bus') return renderBus(await api('/api/bus?' + params), from, to);
+        if (state.mode === 'tra' || state.mode === 'thsr') {
+          return renderRail(await api(`/api/rail?system=${state.mode}&${params}`), from, to);
+        }
+        if (state.mode === 'scooter') {
+          // 填業者名稱是想找車，但車輛位置沒有公開資料，只能請使用者到 App 查
+          if (/goshare|gogoro|wemo|irent|威摩/i.test($('vehicle').value)) {
+            throw new Error('網站查不到共享機車的位置（業者沒有公開）。請在 GoShare／WeMo App 找到車後，把「車子停的地址」填在取車位置，或點地圖 →「設為取車位置」；不填也可以，會從出發點開始規劃。');
+          }
+          const vehicle = $('vehicle').value.trim() ? await resolve('vehicle') : null;
+          if (vehicle) params.set('vehicle', `${vehicle.lat},${vehicle.lng}`);
+          if (state.parking) params.set('parking', state.parking);
+          return renderScooter(await api('/api/scooter?' + params), from, to);
+        }
+        if (state.pickup) params.set('pickup', state.pickup);
+        if (state.dropoff) params.set('dropoff', state.dropoff);
+        if (/站/.test(from.name)) params.set('mrt', '1'); // 從車站出發 → 建議出口
+        render(await api('/api/plan?' + params), from, to);
+      } catch (err) {
+        show(`<div class="card err">${esc(err.message)}</div>`);
+      }
+    }
+
+    // ---------- 轉彎說明 ----------
+    const TURN = {
+      left: '左轉', right: '右轉', 'slight left': '靠左', 'slight right': '靠右',
+      'sharp left': '向左急轉', 'sharp right': '向右急轉', straight: '直行', uturn: '迴轉',
+    };
+
+    function maneuver(s) {
+      if (s.type === 'board') return `在「${s.name}」上車`;
+      if (s.type === 'stop') return `經過「${s.name}」`;
+      if (s.type === 'alight') return `在「${s.name}」下車`;
+      if (s.type === 'stairs') return '走樓梯';
+      if (s.type === 'elevator') return '搭電梯';
+      if (s.type === 'escalator') return '搭手扶梯';
+      const road = s.name ? `進入${s.name}` : '';
+      if (s.type === 'depart') return s.name ? `沿${s.name}出發` : '出發';
+      if (s.type === 'arrive') return '抵達';
+      if (s.type === 'roundabout' || s.type === 'rotary') return `進入圓環${s.name ? '，往' + s.name : ''}`;
+      const turn = TURN[s.modifier] || '繼續前進';
+      if (s.type === 'continue' || s.type === 'new name') {
+        return s.modifier === 'straight' || !s.modifier ? `繼續直行${s.name ? '，沿' + s.name : ''}` : turn + road;
+      }
+      return turn + road;
+    }
+
+    function stepText(s) {
+      const time = s.time ? ` ${s.time}` : ''; // 火車有到站時刻
+      if (s.type === 'board' || s.type === 'alight') return maneuver(s) + time;
+      if (s.type === 'stop') return s.name + time;
+      return s.type === 'arrive' ? '抵達' : `${maneuver(s)}，走 ${km(s.distance)}`;
+    }
+
+    // 「台北車站」本身就有站字；只有一個出口的站，TDX 編號為 0
+    const stationName = (e) => (e.station.endsWith('站') ? e.station : e.station + '站');
+    const exitNo = (e) => (e.exit === '0' ? '出口' : `${e.exit} 號出口`);
+
+    const GMODE = { foot: 'walking', bike: 'bicycling', bus: 'transit', train: 'transit', scooter: 'driving' };
+    const TRANSIT = new Set(['bus', 'train']); // 坐車的段：步驟是沿途各站
+    function gmaps(from, to, mode) {
+      return 'https://www.google.com/maps/dir/?api=1&' + new URLSearchParams({
+        origin: `${from.lat},${from.lng}`, destination: `${to.lat},${to.lng}`, travelmode: GMODE[mode],
+      });
+    }
+
+    // ---------- 規劃結果 ----------
+    let current = null; // { stages, from, to }
+
+    function render(p, from, to) {
+      stopNav();
+      layer.clearLayers();
+      const [walk1, ride, walk2] = p.legs.length === 3 ? p.legs : [p.legs[0], null, p.legs[1]];
+
+      // 每段路的起訖點、標題與到達提示，導航時依序走完
+      const exit = p.exit;
+      const stages = [
+        { leg: walk1, from: exit || from, to: p.pickup, icon: '🚶', title: `步行到借車站：${p.pickup.name}`,
+          arrive: `已到達借車站「${p.pickup.name}」，請借車 🚲` },
+        ride && { leg: ride, from: p.pickup, to: p.dropoff, icon: '🚲', title: `騎車到還車站：${p.dropoff.name}`,
+          arrive: `已到達還車站「${p.dropoff.name}」，請還車` },
+        { leg: walk2, from: p.dropoff, to, icon: '🚶', title: `步行到目的地：${to.name}`,
+          arrive: '🎉 已抵達目的地' },
+      ].filter(Boolean);
+      current = { stages, from, to };
+
+      drawLegs(p.legs, from, to);
+      if (p.exit) {
+        L.marker([p.exit.lat, p.exit.lng], { icon: pin('#0891b2', p.exit.exit.length <= 2 && p.exit.exit !== '0' ? p.exit.exit : '出') })
+          .bindPopup(`${esc(p.exit.name)}<br>${esc(p.exit.description)}`).addTo(layer);
+      }
+      for (const s of p.pickups) stationMarker(s, s.id === p.pickup.id ? '#16a34a' : '#86efac', '借');
+      for (const s of p.dropoffs) stationMarker(s, s.id === p.dropoff.id ? '#7c3aed' : '#c4b5fd', '還');
+      map.fitBounds(L.featureGroup(layer.getLayers()).getBounds(), { padding: [30, 30] });
+
+      const est = p.legs.some((l) => l.estimated) ? '<p class="hint">※ 部分路線服務無回應，為直線距離估算</p>' : '';
+      const alt = (list, sel, type) => list.map((s) => `
+        <div class="alt ${s.id === sel ? 'sel' : ''}" data-type="${type}" data-id="${s.id}">
+          <span>${esc(s.name)}<br><span class="muted">距離 ${km(s.distance)}</span></span>
+          <span>${type === 'pickup' ? '可借' : '可還'}
+            <b class="${cls(type === 'pickup' ? s.bikes : s.docks)}">${type === 'pickup' ? s.bikes : s.docks}</b></span>
+        </div>`).join('');
+
+      show(`
+        ${p.demo ? '<div class="card demo">⚠️ 示範模式：可借/可還數字為模擬資料</div>' : ''}
+        ${p.suggestWalk ? '<div class="card demo">起訖點很近，直接走路可能更快</div>' : ''}
+        <div class="card">
+          <div class="muted">全程約</div>
+          <div class="big">${min(p.total.duration)}・${km(p.total.distance)}</div>
+          ${stages.map((st, i) => stageHtml(st, i,
+            st.leg === walk1 ? `${exit ? `從 <b>${esc(stationName(exit))} ${esc(exitNo(exit))}</b> 出站，` : ''}步行到 <b>${esc(p.pickup.name)}</b> 借車（可借 <b class="${cls(p.pickup.bikes)}">${p.pickup.bikes}</b> 台）<br>`
+            : st.leg === ride ? `騎到 <b>${esc(p.dropoff.name)}</b> 還車（可還 <b class="${cls(p.dropoff.docks)}">${p.dropoff.docks}</b> 位）<br>`
+            : `從還車站步行到 <b>${esc(to.name)}</b><br>`)).join('')}
+          ${est}
+          ${navButtons}
+        </div>
+        ${exit ? `<div class="card"><h2>🚇 建議從 ${esc(stationName(exit))} ${esc(exitNo(exit))}出站</h2>
+          <div class="muted">${esc(exit.description)}${exit.elevator ? '・有電梯' : ''}・離借車站約 ${km(exit.toPickup)}</div>
+          ${p.exits.slice(1, 6).map((e) => `<div class="alt" style="cursor:default"><span>${esc(exitNo(e))}<br>
+            <span class="muted">${esc(e.description)}</span></span><span class="muted">離借車站 ${km(e.toPickup)}</span></div>`).join('')}
+        </div>` : ''}
+        <div class="card"><h2>出發點附近可借車站點</h2>${alt(p.pickups, p.pickup.id, 'pickup')}</div>
+        <div class="card"><h2>目的地附近可還車站點</h2>${alt(p.dropoffs, p.dropoff.id, 'dropoff')}</div>
+        <p class="hint">點選其他站點可改用該站重新規劃。資料更新：${esc(p.pickup.updatedAt)}</p>
+      `);
+    }
+
+    // ---------- 共用：每一段的說明與地圖線 ----------
+    function stageHtml(st, i, detail) {
+      const isTransit = TRANSIT.has(st.leg.mode);
+      return `
+        <div class="step"><span class="icon">${st.icon}</span><div style="flex:1">
+          ${detail}
+          <span class="muted">${isTransit ? `${st.leg.stopCount} 站・` : ''}${km(st.leg.distance)}・約 ${min(st.leg.duration)}</span>
+          <details ${st.leg.mode === 'foot' ? 'open' : ''}>
+            <summary>${isTransit ? `沿途停靠站（${st.leg.stopCount} 站）` : `怎麼走（${st.leg.steps.length} 個步驟）`}</summary>
+            <ol class="dirs" data-stage="${i}">${st.leg.steps.map((s) => `<li>${esc(stepText(s))}</li>`).join('')}</ol>
+          </details>
+          <div class="links"><a target="_blank" rel="noopener" href="${gmaps(st.from, st.to, st.leg.mode)}">用 Google 地圖導航這段</a></div>
+        </div></div>`;
+    }
+
+    const LEG_STYLE = {
+      foot: { color: '#2563eb', weight: 5, dashArray: '6 8' },
+      bike: { color: '#f5a000', weight: 6 },
+      bus: { color: '#16a34a', weight: 6 },
+      scooter: { color: '#7c3aed', weight: 6 },
+      train: { color: '#0f766e', weight: 6 },
+    };
+
+    function drawLegs(legs, from, to) {
+      for (const leg of legs) {
+        L.polyline(leg.path, LEG_STYLE[leg.mode]).addTo(layer);
+        if (TRANSIT.has(leg.mode)) {
+          for (const s of leg.steps) {
+            L.circleMarker([s.lat, s.lng], { radius: s.type === 'stop' ? 3 : 6, color: LEG_STYLE[leg.mode].color, fillColor: '#fff', fillOpacity: 1, weight: 2 })
+              .bindPopup(`${esc(s.name)}${s.address ? '<br>' + esc(s.address) : ''}`).addTo(layer);
+          }
+        }
+      }
+      L.marker([from.lat, from.lng], { icon: pin('#2563eb', '起') }).bindPopup(esc(from.name)).addTo(layer);
+      L.marker([to.lat, to.lng], { icon: pin('#dc2626', '終') }).bindPopup(esc(to.name)).addTo(layer);
+    }
+
+    const navButtons = `
+      <div class="navbtns">
+        <button type="button" class="primary" id="navStart">▶ 開始導航</button>
+        <button type="button" id="navSim" title="沿路線模擬移動，在電腦上測試導航">模擬導航</button>
+      </div>`;
+
+    // ---------- 公車 ----------
+    let busResult = null; // 最近一次公車規劃結果，切換方案時不用重查
+
+    const etaHtml = (b) => `<span class="${b.eta != null && b.eta >= 0 && b.eta < 180 ? 'eta-now' : 'muted'}">${esc(b.etaText)}</span>`;
+
+    function renderBus(r, from, to) {
+      busResult = { r, from, to };
+      if (!r.options.length) {
+        stopNav();
+        layer.clearLayers();
+        return show(`<div class="card err">附近 600 公尺內找不到可以到達的公車（目前只支援台北市、新北市，最多轉乘一次）</div>
+          ${nearbyHtml(r.nearby)}`);
+      }
+      showBusOption(0);
+    }
+
+    function nearbyHtml(list) {
+      if (!list.length) return '';
+      return `<div class="card"><h2>🚏 出發點附近公車即時到站</h2>
+        ${list.map((n) => `<div class="alt" style="cursor:default">
+          <span><span class="chip">${esc(n.route)}</span> <span class="muted">${esc(n.headsign)}</span><br>
+          <span class="muted">${esc(n.stop)}・${km(n.distance)}</span></span>${etaHtml(n)}</div>`).join('')}
+      </div>`;
+    }
+
+    function showBusOption(idx) {
+      const { r, from, to } = busResult;
+      const o = r.options[idx];
+      stopNav();
+      layer.clearLayers();
+
+      // 每段的起訖點：步行段接在前一班車下車處（或出發點）與下一班車上車處（或目的地）之間
+      const stages = o.legs.map((leg, i) => {
+        const prev = o.legs[i - 1], next = o.legs[i + 1];
+        if (leg.mode === 'bus') {
+          const nextBus = next?.mode === 'bus' ? next : null; // 原地轉乘
+          return {
+            leg, from: leg.board, to: leg.alight, icon: '🚌',
+            title: `搭 ${leg.route}（${leg.headsign}）到「${leg.alight.name}」`,
+            arrive: nextBus
+              ? `請在「${leg.alight.name}」下車，原地轉乘 ${nextBus.route}`
+              : `請在「${leg.alight.name}」下車 🔔`,
+          };
+        }
+        const legFrom = prev?.mode === 'bus' ? prev.alight : from;
+        if (next?.mode === 'bus') {
+          return {
+            leg, from: legFrom, to: next.board, icon: '🚶',
+            title: `${prev ? '步行轉乘到' : '步行到公車站'}「${next.board.name}」`,
+            arrive: `已到達「${next.board.name}」站牌，請搭 ${next.route}（${next.headsign}）・${next.etaText}`,
+          };
+        }
+        return { leg, from: legFrom, to, icon: '🚶', title: `步行到目的地：${to.name}`, arrive: '🎉 已抵達目的地' };
+      });
+      current = { stages, from, to };
+      drawLegs(o.legs, from, to);
+      map.fitBounds(L.featureGroup(layer.getLayers()).getBounds(), { padding: [30, 30] });
+
+      const chips = (opt) => opt.legs.map((l) => (l.mode === 'bus'
+        ? `<span class="chip">${esc(l.route)}</span>`
+        : `<span class="chip walk">🚶${Math.max(1, Math.round(l.duration / 60))}′</span>`)).join(' › ');
+
+      const detail = (st) => {
+        const l = st.leg;
+        if (l.mode === 'bus') {
+          return `搭 <span class="chip">${esc(l.route)}</span> ${esc(l.headsign)}<br>
+            「${esc(l.board.name)}」上車 → 「${esc(l.alight.name)}」下車<br>${etaHtml(l)}<br>`;
+        }
+        return `${esc(st.title)}<br>`;
+      };
+
+      const est = o.legs.some((l) => l.estimated) ? '<p class="hint">※ 部分步行路線服務無回應，為直線距離估算</p>' : '';
+      show(`
+        ${r.options.map((opt, i) => `
+          <div class="card opt ${i === idx ? 'sel' : ''}" data-opt="${i}">
+            <div class="chips">${chips(opt)}</div>
+            <div><b>約 ${min(opt.total.duration)}</b>
+              <span class="muted">・${opt.transfers ? `轉乘 ${opt.transfers} 次` : '直達'}・步行 ${km(opt.walkDistance)}・第一班 ${esc(opt.legs.find((l) => l.mode === 'bus').etaText)}</span></div>
+          </div>`).join('')}
+        <div class="card">
+          <h2>路線說明</h2>
+          ${stages.map((st, i) => stageHtml(st, i, detail(st))).join('')}
+          ${est}
+          ${navButtons}
+        </div>
+        ${nearbyHtml(r.nearby)}
+        <p class="hint">時間含等車的估計值；到站時間每 30 秒更新，重新規劃即可取得最新資訊。</p>
+      `);
+    }
+
+    // ---------- 台鐵／高鐵 ----------
+    let railResult = null;
+    const TRAIN_FILTERS = {
+      all: { label: '全部', test: () => true },
+      express: { label: '自強／普悠瑪／太魯閣', test: (t) => ['自強', '普悠瑪', '太魯閣'].includes(t.type) },
+      local: { label: '區間／區間快', test: (t) => t.type.startsWith('區間') },
+      chukuang: { label: '莒光', test: (t) => t.type === '莒光' },
+    };
+    const hhmm = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+    const trainChip = (t) => `<span class="chip ${t.type === '高鐵' ? 'hsr' : t.type.startsWith('區間') ? 'tra' : 'fast'}">${esc(t.type)} ${esc(t.no)}</span>`;
+
+    function renderRail(r, from, to) {
+      railResult = { r, from, to, filter: 'all' };
+      if (!r.trains.length) {
+        stopNav();
+        layer.clearLayers();
+        return show(`<div class="card err">今天接下來沒有可以搭的${esc(r.label)}班次
+          （${esc(r.origins.map((s) => s.name).join('、'))} → ${esc(r.dests.map((s) => s.name).join('、'))}）。
+          ${r.suspendedCount ? `<br><b>有 ${r.suspendedCount} 班因停駛取消</b>，請留意台鐵公告。` : ''}</div>`);
+      }
+      showTrain(0);
+    }
+
+    function showTrain(idx) {
+      const { r, from, to, filter } = railResult;
+      const t = r.trains[idx];
+      stopNav();
+      layer.clearLayers();
+
+      const stages = [
+        !t.walkIn.far && { leg: t.walkIn, from, to: t.origin, icon: '🚶', title: `步行到${t.origin.name}站`,
+          arrive: `已到達${t.origin.name}站，請搭 ${t.type} ${t.no}（${t.dep} 開）` },
+        { leg: t.leg, from: t.origin, to: t.dest, icon: r.system === 'thsr' ? '🚄' : '🚆',
+          title: `${t.type} ${t.no}（${t.headsign}）到${t.dest.name}`, arrive: `到站了！請在${t.dest.name}站下車` },
+        !t.walkOut.far && { leg: t.walkOut, from: t.dest, to, icon: '🚶', title: `步行到目的地：${to.name}`, arrive: '🎉 已抵達目的地' },
+      ].filter(Boolean);
+      current = { stages, from, to };
+      drawLegs(stages.map((s) => s.leg), from, to);
+      map.fitBounds(L.featureGroup(layer.getLayers()).getBounds(), { padding: [30, 30] });
+
+      const far = (a, s, dir) => (a.far
+        ? `<div class="card demo">⚠️ ${dir === 'in' ? '出發點離' : '目的地離'}${esc(s.name)}站約 ${km(a.distance)}，太遠不適合步行，建議改搭公車、YouBike 或計程車${dir === 'in' ? '前往' : ''}。</div>`
+        : '');
+      const delay = (x) => (x.delay ? `<span class="low">誤點 ${x.delay} 分</span>` : '');
+      const visible = r.trains.map((x, i) => [x, i]).filter(([x]) => TRAIN_FILTERS[filter].test(x));
+      const detail = (st) => (st.leg === t.leg
+        ? `搭 ${trainChip(t)} ${esc(t.headsign)}<br>${esc(t.origin.name)} ${esc(t.dep)} 開 → ${esc(t.dest.name)} ${esc(t.arr)} 到 ${delay(t)}<br>`
+        : `${esc(st.title)}<br>`);
+
+      show(`
+        ${r.suspendedCount ? `<div class="card demo">今天這段有 ${r.suspendedCount} 班${esc(r.label)}停駛，以下只列出有行駛的班次。</div>` : ''}
+        ${r.system === 'tra' ? `<div class="filters">${Object.entries(TRAIN_FILTERS).map(([k, f]) =>
+          `<button type="button" data-filter="${k}" class="${k === filter ? 'on' : ''}">${f.label}</button>`).join('')}</div>` : ''}
+        ${visible.length ? visible.map(([x, i]) => `
+          <div class="card opt ${i === idx ? 'sel' : ''}" data-train="${i}">
+            <div class="chips">${trainChip(x)} <b>${esc(x.dep)} → ${esc(x.arr)}</b> ${delay(x)}</div>
+            <div class="muted">${esc(x.origin.name)} → ${esc(x.dest.name)}・${x.minutes} 分・停 ${x.stopCount} 站・抵達目的地約 ${hhmm(x.reach)}</div>
+          </div>`).join('') : '<div class="card muted">這個車種接下來沒有班次</div>'}
+        ${far(t.walkIn, t.origin, 'in')}
+        <div class="card">
+          <h2>路線說明</h2>
+          ${stages.map((st, i) => stageHtml(st, i, detail(st))).join('')}
+          ${t.note ? `<p class="hint">備註：${esc(t.note)}</p>` : ''}
+          ${navButtons}
+        </div>
+        ${far(t.walkOut, t.dest, 'out')}
+        <p class="hint">時刻來自交通部 TDX，依抵達目的地時間排序。${r.system === 'tra' ? '誤點資訊每 2 分鐘更新。' : ''}</p>
+      `);
+    }
+
+    // ---------- 共享機車 ----------
+    function renderScooter(p, from, to) {
+      stopNav();
+      layer.clearLayers();
+      const legs = [...p.legs];
+      const walk1 = p.vehicle ? legs.shift() : null;
+      const [ride, walk2] = legs;
+      const start = p.vehicle ? { ...p.vehicle, name: '取車位置' } : from;
+      const pk = p.parking;
+
+      const stages = [
+        walk1 && { leg: walk1, from, to: start, icon: '🚶', title: '步行到取車位置',
+          arrive: '已到達取車位置，請用 App 掃碼解鎖 🛵' },
+        { leg: ride, from: start, to: pk, icon: '🛵', title: `騎到停車場：${pk.name}`,
+          arrive: `已到達「${pk.name}」，請停入機車格後在 App 還車` },
+        { leg: walk2, from: pk, to, icon: '🚶', title: `步行到目的地：${to.name}`, arrive: '🎉 已抵達目的地' },
+      ].filter(Boolean);
+      current = { stages, from, to };
+
+      drawLegs(p.legs, from, to);
+      if (p.vehicle) L.marker([p.vehicle.lat, p.vehicle.lng], { icon: pin('#7c3aed', '車') }).bindPopup('取車位置').addTo(layer);
+      for (const s of p.parkings) {
+        L.marker([s.lat, s.lng], { icon: pin(s.id === pk.id ? '#7c3aed' : '#c4b5fd', 'P') })
+          .bindPopup(`<b>${esc(s.name)}</b><br>${esc(s.address)}<br>機車格 ${s.totalMotor}${s.available != null ? `・空位 ${s.available}` : ''}<br>${esc(s.fee)}`)
+          .addTo(layer);
+      }
+      map.fitBounds(L.featureGroup(layer.getLayers()).getBounds(), { padding: [30, 30] });
+
+      const spaces = (s) => (s.available != null
+        ? `空位 <b class="${cls(s.available)}">${s.available}</b>`
+        : `<span class="muted">共 ${s.totalMotor} 格</span>`);
+      const detail = (st) => (st.leg === walk1 ? '步行到取車位置<br>'
+        : st.leg === ride ? `騎到 <b>${esc(pk.name)}</b>（${spaces(pk)}）<br>`
+        : `從停車場步行到 <b>${esc(to.name)}</b><br>`);
+      const est = p.legs.some((l) => l.estimated) ? '<p class="hint">※ 部分路線服務無回應，為直線距離估算</p>' : '';
+
+      show(`
+        ${p.vehicle ? '' : `<div class="card demo">車輛位置請在 App 查看（業者沒有公開車輛資料）。找到車後把位置填在「取車位置」，就能帶你走過去。
+          <div class="links"><a target="_blank" rel="noopener" href="https://www.ridegoshare.com/">🛵 開啟 GoShare</a>
+          <a target="_blank" rel="noopener" href="https://www.wemoscooter.com/">🛵 開啟 WeMo</a></div></div>`}
+        <div class="card">
+          <div class="muted">全程約</div>
+          <div class="big">${min(p.total.duration)}・${km(p.total.distance)}</div>
+          ${stages.map((st, i) => stageHtml(st, i, detail(st))).join('')}
+          ${est}
+          ${navButtons}
+        </div>
+        <div class="card"><h2>🅿️ 目的地附近可停機車的停車場</h2>
+          ${p.parkings.map((s) => `
+            <div class="alt ${s.id === pk.id ? 'sel' : ''}" data-type="parking" data-id="${esc(s.id)}">
+              <span>${esc(s.name)}<br><span class="muted">距目的地 ${km(s.distance)}・${esc(s.hours)}<br>${esc(s.fee)}</span></span>
+              <span style="white-space:nowrap">${spaces(s)}</span>
+            </div>`).join('')}
+        </div>
+        <p class="hint">點選其他停車場可改停該處重新規劃。共享機車請確認停車場在業者的服務範圍內、可否在該處還車；停車費依現場公告。空位資料時間：${esc(p.availabilityUpdated)}</p>
+      `);
+    }
+
+    function stationMarker(s, color, text) {
+      L.marker([s.lat, s.lng], { icon: pin(color, text) })
+        .bindPopup(`<b>${esc(s.name)}</b><br>${esc(s.address)}<br>可借 ${s.bikes}・可還 ${s.docks}`)
+        .addTo(layer);
+    }
+
+    // ---------- 即時導航 ----------
+    const ARRIVE_M = 25;  // 距離終點多近算到達
+    const STEP_M = 15;    // 距離轉彎點多近算走過
+    let nav = null;       // { stage, step, watch, timer, marker, done }
+
+    function dist(a, b) {
+      const R = 6371000, r = Math.PI / 180;
+      const h = Math.sin((b.lat - a.lat) * r / 2) ** 2 +
+        Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin((b.lng - a.lng) * r / 2) ** 2;
+      return 2 * R * Math.asin(Math.sqrt(h));
+    }
+
+    // ---------- 方向（指南針 / GPS 行進方向） ----------
+    let heading = null; // 手機面向的方位角，0 = 北，順時針
+
+    function bearing(a, b) {
+      const r = Math.PI / 180;
+      const y = Math.sin((b.lng - a.lng) * r) * Math.cos(b.lat * r);
+      const x = Math.cos(a.lat * r) * Math.sin(b.lat * r) -
+        Math.sin(a.lat * r) * Math.cos(b.lat * r) * Math.cos((b.lng - a.lng) * r);
+      return (Math.atan2(y, x) / r + 360) % 360;
+    }
+
+    const COMPASS = ['北', '東北', '東', '東南', '南', '西南', '西', '西北'];
+    const RELATIVE = ['正前方', '右前方', '右邊', '右後方', '後方（請迴轉）', '左後方', '左邊', '左前方'];
+    const sector = (deg) => Math.round(((deg % 360) + 360) % 360 / 45) % 8;
+
+    function onOrientation(e) {
+      if (!nav) return;
+      if (e.webkitCompassHeading != null) heading = e.webkitCompassHeading;     // iOS
+      else if (e.absolute && e.alpha != null) heading = (360 - e.alpha) % 360;  // Android
+      else return;
+      nav.compass = true; // 有指南針就不用 GPS 行進方向
+      if (nav.last) onPosition(nav.last, true);
+    }
+
+    async function enableCompass() {
+      try {
+        // iOS 13+ 必須在使用者按按鈕時要求權限
+        if (typeof DeviceOrientationEvent?.requestPermission === 'function') {
+          if (await DeviceOrientationEvent.requestPermission() !== 'granted') return;
+        }
+      } catch { return; }
+      window.addEventListener('deviceorientationabsolute', onOrientation);
+      window.addEventListener('deviceorientation', onOrientation);
+    }
+
+    function disableCompass() {
+      window.removeEventListener('deviceorientationabsolute', onOrientation);
+      window.removeEventListener('deviceorientation', onOrientation);
+      heading = null;
+    }
+
+    function showDirection(pos, target) {
+      const b = bearing(pos, target);
+      if (heading == null) {
+        // 沒有指南針：只能給絕對方向
+        $('navArrow').style.transform = `rotate(${b}deg)`;
+        $('navDir').textContent = `往${COMPASS[sector(b)]}方走（箭頭上方為北）`;
+      } else {
+        const rel = b - heading;
+        $('navArrow').style.transform = `rotate(${rel}deg)`;
+        $('navDir').textContent = `下一個點在你的${RELATIVE[sector(rel)]}`;
+      }
+    }
+
+    function startNav(simulate) {
+      if (!current) return;
+      stopNav();
+      nav = { stage: 0, step: 1, marker: null, simulate };
+      if (!simulate) enableCompass();
+      $('nav').classList.add('on');
+      $('navNotice').hidden = true;
+      $('navInstr').textContent = '定位中…';
+      $('nav').scrollIntoView({ block: 'start' });
+      map.setZoom(18);
+
+      if (simulate) {
+        const pts = simulatePath();
+        let i = 0;
+        nav.timer = setInterval(() => {
+          if (i >= pts.length) return clearInterval(nav.timer);
+          // 模擬時，面向就是移動方向
+          const p = pts[i++], q = pts[i];
+          if (q && dist(p, q) > 1) heading = bearing(p, q);
+          onPosition(p);
+        }, 250);
+      } else {
+        if (!navigator.geolocation) return navError('瀏覽器不支援定位');
+        nav.watch = navigator.geolocation.watchPosition(
+          ({ coords }) => {
+            // 沒有指南針時，走動中用 GPS 的行進方向
+            if (coords.heading != null && !Number.isNaN(coords.heading) && coords.speed > 0.8 && !nav.compass) {
+              heading = coords.heading;
+            }
+            onPosition({ lat: coords.latitude, lng: coords.longitude });
+          },
+          () => navError('無法取得位置，請允許定位權限（手機需透過 https 網址開啟）'),
+          { enableHighAccuracy: true, maximumAge: 2000 },
+        );
+      }
+    }
+
+    function stopNav() {
+      if (!nav) return;
+      if (nav.watch != null) navigator.geolocation.clearWatch(nav.watch);
+      clearInterval(nav.timer);
+      if (nav.marker) nav.marker.remove();
+      disableCompass();
+      nav = null;
+      $('nav').classList.remove('on');
+      document.querySelectorAll('.dirs li.now').forEach((li) => li.classList.remove('now'));
+    }
+
+    function navError(msg) {
+      $('navInstr').textContent = msg;
+    }
+
+    function onPosition(pos, headingOnly) {
+      if (!nav) return;
+      nav.last = pos;
+      if (!nav.marker) {
+        nav.marker = L.marker([pos.lat, pos.lng], {
+          icon: L.divIcon({ className: '', html: '<div class="me"><div class="cone"></div><div class="dot"></div></div>',
+                            iconSize: [40, 40], iconAnchor: [20, 20] }),
+          zIndexOffset: 1000,
+        }).addTo(map);
+      }
+      const me = nav.marker.getElement()?.querySelector('.me');
+      if (me) {
+        me.querySelector('.cone').style.display = heading == null ? 'none' : '';
+        me.style.transform = `rotate(${heading ?? 0}deg)`;
+      }
+      if (headingOnly) {
+        const st = current.stages[nav.stage];
+        if (TRANSIT.has(st.leg.mode)) return;
+        return showDirection(pos, st.leg.steps[Math.min(nav.step, st.leg.steps.length - 1)]);
+      }
+      nav.marker.setLatLng([pos.lat, pos.lng]);
+      map.panTo([pos.lat, pos.lng]);
+
+      const st = current.stages[nav.stage];
+      const steps = st.leg.steps;
+
+      // 到達這一段的終點 → 提示並進入下一段
+      if (dist(pos, st.to) < ARRIVE_M) {
+        $('navNotice').textContent = st.arrive;
+        $('navNotice').hidden = false;
+        if (nav.stage === current.stages.length - 1) {
+          $('navStage').textContent = '導航完成';
+          $('navInstr').textContent = st.arrive;
+          $('navRest').textContent = '';
+          clearInterval(nav.timer);
+          if (nav.watch != null) navigator.geolocation.clearWatch(nav.watch);
+          return;
+        }
+        nav.stage++;
+        nav.step = 1;
+        return onPosition(pos);
+      }
+
+      // 走到轉彎點附近，或已經比轉彎點更接近再下一個點（代表走過了），就換下一個提示
+      while (nav.step < steps.length - 1) {
+        const here = steps[nav.step], after = steps[nav.step + 1];
+        if (dist(pos, here) < STEP_M || dist(pos, after) < dist(here, after) - STEP_M) nav.step++;
+        else break;
+      }
+      const next = steps[Math.min(nav.step, steps.length - 1)];
+      const d = Math.round(dist(pos, next));
+
+      $('navStage').textContent = `${st.icon} 第 ${nav.stage + 1}/${current.stages.length} 段・${st.title}`;
+      if (TRANSIT.has(st.leg.mode)) {
+        // 坐車時不用指方向，只要知道還有幾站
+        $('navInstr').textContent = next.type === 'alight' ? `下一站「${next.name}」下車 🔔` : `下一站：${next.name}`;
+        $('navRest').textContent = `還有 ${next.remaining + 1} 站下車`;
+        $('navArrow').style.transform = '';
+        $('navDir').textContent = '';
+      } else {
+        $('navInstr').textContent = next.type === 'arrive' ? `${km(d)} 後抵達` : `${km(d)} 後${maneuver(next)}`;
+        $('navRest').textContent = `這段剩約 ${km(Math.round(dist(pos, st.to)))}（直線）`;
+        showDirection(pos, next);
+      }
+      if (nav.step > 1 || nav.stage > 0) {
+        // 新一段開始後一小段距離就收起到達提示
+        if (dist(pos, st.from) > 40) $('navNotice').hidden = true;
+      }
+
+      document.querySelectorAll('.dirs li.now').forEach((li) => li.classList.remove('now'));
+      const li = document.querySelector(`.dirs[data-stage="${nav.stage}"] li:nth-child(${nav.step + 1})`);
+      if (li) li.classList.add('now');
+    }
+
+    // 沿整條路線每約 8 公尺取一個點，用來在電腦上模擬走路／騎車
+    function simulatePath() {
+      const out = [];
+      for (const st of current.stages) {
+        const path = st.leg.path.map(([lat, lng]) => ({ lat, lng }));
+        for (let i = 0; i < path.length - 1; i++) {
+          const a = path[i], b = path[i + 1];
+          const n = Math.max(1, Math.round(dist(a, b) / 8));
+          for (let k = 0; k < n; k++) {
+            out.push({ lat: a.lat + (b.lat - a.lat) * k / n, lng: a.lng + (b.lng - a.lng) * k / n });
+          }
+        }
+        out.push(st.to, st.to, st.to, st.to); // 在站點停一下，看得到借/還車提示
+      }
+      return out;
+    }
+
+    $('navStop').addEventListener('click', stopNav);
+
+    $('out').addEventListener('click', (e) => {
+      if (e.target.id === 'navStart') return startNav(false);
+      if (e.target.id === 'navSim') return startNav(true);
+      const filter = e.target.closest('[data-filter]');
+      if (filter) {
+        railResult.filter = filter.dataset.filter;
+        // 切換車種後，預設選該車種最早抵達的班次
+        const first = railResult.r.trains.findIndex((t) => TRAIN_FILTERS[railResult.filter].test(t));
+        return showTrain(first >= 0 ? first : 0);
+      }
+      const opt = e.target.closest('.opt');
+      if (opt?.dataset.train) return showTrain(Number(opt.dataset.train));
+      if (opt) return showBusOption(Number(opt.dataset.opt));
+      const el = e.target.closest('.alt[data-type]'); // 只有借/還車站清單可以點
+      if (!el) return;
+      state[el.dataset.type] = el.dataset.id;
+      plan();
+    });
+
+    // 點舉例就填入對應欄位
+    for (const ex of document.querySelectorAll('.ex')) {
+      ex.addEventListener('click', (e) => {
+        if (e.target.tagName !== 'BUTTON') return;
+        const k = ex.dataset.for;
+        $(k).value = e.target.textContent;
+        points[k] = null;
+      });
+    }
+
+    $('tabs').addEventListener('click', (e) => {
+      const mode = e.target.dataset.mode;
+      if (!mode || mode === state.mode) return;
+      state.mode = mode;
+      for (const b of $('tabs').children) b.classList.toggle('on', b.dataset.mode === mode);
+      $('vehicleRow').hidden = mode !== 'scooter';
+      if (points.from && points.to || $('from').value && $('to').value) {
+        resetChoices();
+        plan();
+      }
+    });
+
+    $('form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      resetChoices();
+      plan();
+    });
+
+    $('locate').addEventListener('click', () => {
+      if (!navigator.geolocation) return show('<div class="card err">瀏覽器不支援定位</div>');
+      navigator.geolocation.getCurrentPosition(
+        ({ coords }) => {
+          points.from = { lat: coords.latitude, lng: coords.longitude, name: '目前位置' };
+          $('from').value = '目前位置';
+          map.setView([coords.latitude, coords.longitude], 16);
+        },
+        () => show('<div class="card err">無法取得目前位置，請改用輸入</div>'),
+      );
+    });
+
+    map.on('click', (e) => {
+      const { lat, lng } = e.latlng;
+      const label = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      const box = document.createElement('div');
+      box.innerHTML = '<button data-k="from">設為出發點</button> <button data-k="to">設為目的地</button>' +
+        (state.mode === 'scooter' ? ' <button data-k="vehicle">設為取車位置</button>' : '');
+      box.addEventListener('click', (ev) => {
+        const k = ev.target.dataset.k;
+        if (!k) return;
+        points[k] = { lat, lng, name: k === 'vehicle' ? '取車位置' : '地圖選點' };
+        $(k).value = label;
+        map.closePopup();
+        if (points.from && points.to) { resetChoices(); plan(); }
+      });
+      L.popup().setLatLng(e.latlng).setContent(box).openOn(map);
+    });
+  </script>
+</body>
+</html>

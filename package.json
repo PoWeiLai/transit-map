@@ -1,0 +1,19 @@
+{
+  "name": "transit-map",
+  "version": "1.0.0",
+  "description": "公共交通地圖：YouBike、公車、共享機車路線規劃與導航",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "demo": "node server.js --demo"
+  },
+  "keywords": [],
+  "type": "module",
+  "dependencies": {
+    "express": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
