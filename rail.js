@@ -127,8 +127,8 @@ function nearbyStations(stations, point) {
   return sorted.filter((s) => s.distance <= sorted[0].distance + CANDIDATE_EXTRA_M).slice(0, CANDIDATES);
 }
 
-// connect(from, to) 規劃到車站／離開車站的接駁（步行、公車、YouBike、計程車），
-// 太遠時先回傳估算的路線；connect.refine(access) 再換成實際路線，只對最後列出的班次做
+// connect.in(from, 車站)／connect.out(車站, to) 規劃到車站、離開車站的接駁（步行、公車、YouBike、計程車），
+// 太遠時先回傳估算的路線；connect.in.refine(access) 再換成實際路線，只對最後列出的班次做
 // when = { date: 'YYYY-MM-DD', minutes: 當天第幾分鐘 }：列出這個時間之後的班次，預設現在
 export async function planRail(system, from, to, connect, when = taipeiNow()) {
   const sys = SYSTEMS[system];
@@ -142,8 +142,8 @@ export async function planRail(system, from, to, connect, when = taipeiNow()) {
   const [trains, delays, walkIns, walkOuts, fares] = await Promise.all([
     sys.trains(when.date),
     today ? sys.delays() : new Map(),
-    Promise.all(origins.map((o) => connect(from, o))),
-    Promise.all(dests.map((d) => connect(d, to))),
+    Promise.all(origins.map((o) => connect.in(from, o))),
+    Promise.all(dests.map((d) => connect.out(d, to))),
     sys.fares?.().catch(() => null), // 票價只是參考，抓不到照樣規劃
   ]);
   const byId = new Map(stations.map((s) => [s.id, s]));
@@ -225,7 +225,7 @@ export async function planRail(system, from, to, connect, when = taipeiNow()) {
   // 列出的班次才換成實際接駁路線（同一個車站只算一次），再依實際抵達時間重新排序
   const refined = new Map();
   const refine = (a) => {
-    if (!refined.has(a)) refined.set(a, connect.refine(a));
+    if (!refined.has(a)) refined.set(a, connect.in.refine(a));
     return refined.get(a);
   };
   const seatsBy = new Map();

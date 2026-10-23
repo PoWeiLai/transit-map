@@ -10,6 +10,8 @@ const MAX_ACCESS_M = 15000;     // 離最近的捷運站太遠就不規劃
 const SAME_STATION_S = 60;      // 同一站換到另一條路線（同月台或換邊）
 const TRANSFER_PENALTY_S = 120; // 轉乘不舒服，同樣快時選少轉乘的（只影響排序）
 const MAX_OPTIONS = 3;
+const BOARD_CHOICES = 6;          // 列出幾個上車／下車站讓使用者改選
+const BOARD_CHOICE_EXTRA_M = 3000;
 
 let net = null;
 function load() {
@@ -88,14 +90,23 @@ function service(s, minutes, holiday) {
 
 const isHoliday = (date) => [0, 6].includes(new Date(`${date}T12:00:00+08:00`).getUTCDay());
 
-function nearby(point) {
+// 附近的車站：同名的站（不同系統的同一站）只算一個，避免候選都擠在同一站
+function nearby(point, limit = CANDIDATES, extra = CANDIDATE_EXTRA_M) {
   const sorted = load().list
     .map((s) => ({ ...s, distance: Math.round(distance(point, s)) }))
     .sort((a, b) => a.distance - b.distance);
-  // 同名的站（不同系統的同一站）只算一個，避免候選都擠在同一站
   const seen = new Set();
-  return sorted.filter((s) => s.distance <= sorted[0].distance + CANDIDATE_EXTRA_M && !seen.has(s.name) && seen.add(s.name))
-    .slice(0, CANDIDATES);
+  return sorted.filter((s) => s.distance <= sorted[0].distance + extra && !seen.has(s.name) && seen.add(s.name))
+    .slice(0, limit);
+}
+
+// 使用者指定上車／下車站（站名）時只用那一站，否則用附近幾站
+function candidates(point, name) {
+  if (name) {
+    const s = nearby(point, Infinity, Infinity).find((x) => x.name === name);
+    if (s) return [s];
+  }
+  return nearby(point);
 }
 
 // 同名且相鄰的站（不同系統、或同系統不同線各有站號）視為同一站
@@ -225,10 +236,14 @@ function fareOf(segments) {
   return { total, split: groups.length > 1 };
 }
 
-// connect / connect.refine 與台鐵相同：規劃到車站、離開車站的接駁
-export async function planMetro(from, to, connect, when = taipeiNow()) {
-  const origins = nearby(from);
-  const dests = nearby(to);
+// connect.in／connect.out 與台鐵相同：規劃到車站、離開車站的接駁
+// choice = { board, alight }：使用者指定的上車／下車站名（例如騎 YouBike 到遠一點、不用轉乘的站）
+export async function planMetro(from, to, connect, choice = {}, when = taipeiNow()) {
+  const origins = candidates(from, choice.board);
+  const dests = candidates(to, choice.alight);
+  // 可以改選的上車／下車站（附近 3 公里內）
+  const boardChoices = nearby(from, BOARD_CHOICES, BOARD_CHOICE_EXTRA_M);
+  const alightChoices = nearby(to, BOARD_CHOICES, BOARD_CHOICE_EXTRA_M);
   if (!origins.length || origins[0].distance > MAX_ACCESS_M) throw new Error('出發點附近 15 公里內沒有捷運或輕軌站');
   if (!dests.length || dests[0].distance > MAX_ACCESS_M) throw new Error('目的地附近 15 公里內沒有捷運或輕軌站');
   if (origins.some((o) => dests.some((d) => d.name === o.name)) && origins[0].name === dests[0].name) {
@@ -236,8 +251,8 @@ export async function planMetro(from, to, connect, when = taipeiNow()) {
   }
   const holiday = isHoliday(when.date);
   const [walkIns, walkOuts] = await Promise.all([
-    Promise.all(origins.map((o) => connect(from, o))),
-    Promise.all(dests.map((d) => connect(d, to))),
+    Promise.all(origins.map((o) => connect.in(from, o))),
+    Promise.all(dests.map((d) => connect.out(d, to))),
   ]);
 
   const { services } = load();
@@ -270,7 +285,7 @@ export async function planMetro(from, to, connect, when = taipeiNow()) {
   }).slice(0, MAX_OPTIONS);
 
   const options = await Promise.all(picked.map(async (f) => {
-    const [walkIn, walkOut] = await Promise.all([connect.refine(walkIns[f.oi]), connect.refine(walkOuts[f.di])]);
+    const [walkIn, walkOut] = await Promise.all([connect.in.refine(walkIns[f.oi]), connect.out.refine(walkOuts[f.di])]);
     const duration = Math.round(walkIn.duration + f.ride + walkOut.duration);
     // 搭第一班車時是否在營運時間內
     const first = f.segments[0];
@@ -289,5 +304,6 @@ export async function planMetro(from, to, connect, when = taipeiNow()) {
     };
   }));
   options.sort((a, b) => a.duration - b.duration);
-  return { origins, dests, options, now: when, holiday };
+  const brief = (list) => list.map(({ name, distance: d, op }) => ({ name, distance: d, operator: load().operators[op] }));
+  return { origins, dests, options, now: when, holiday, boardChoices: brief(boardChoices), alightChoices: brief(alightChoices), choice };
 }

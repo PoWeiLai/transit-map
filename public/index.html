@@ -24,7 +24,7 @@
     .row { display:flex; gap:6px; }
     .ex { margin:6px 0 0; font-size:12px; color:var(--muted); display:flex; flex-wrap:wrap; align-items:center; gap:4px; }
     .ex button { padding:2px 8px; font-size:12px; border-radius:999px; }
-    input { box-sizing:border-box; width:100%; flex:1; min-width:0; padding:9px 10px; font-size:15px; border-radius:8px; border:1px solid var(--line);
+    input, select { box-sizing:border-box; width:100%; flex:1; min-width:0; padding:9px 10px; font-size:15px; border-radius:8px; border:1px solid var(--line);
             background:var(--card); color:var(--fg); }
     button { padding:9px 12px; font-size:15px; border-radius:8px; border:1px solid var(--line);
              background:var(--card); color:var(--fg); cursor:pointer; white-space:nowrap; }
@@ -133,6 +133,15 @@
           <a target="_blank" rel="noopener" href="https://www.wemoscooter.com/">🛵 開啟 WeMo</a>
         </div>
       </div>
+      <div id="accessRow" hidden>
+        <div class="row">
+          <div style="flex:1"><label for="access">到車站怎麼去</label>
+            <select id="access"></select></div>
+          <div style="flex:1"><label for="egress">出站後怎麼走</label>
+            <select id="egress"></select></div>
+        </div>
+        <p class="ex">選 YouBike 後，結果裡可以換借車站、還車站（例如騎一段就還車再走）</p>
+      </div>
       <div id="whenRow" hidden>
         <div class="row">
           <div style="flex:1"><label for="date">乘車日期</label><input id="date" type="date" /></div>
@@ -168,9 +177,22 @@
 
     // 已確認的座標；使用者改了文字就清掉，重新查詢
     const points = { from: null, to: null, vehicle: null };
-    const state = { mode: 'bike', pickup: null, dropoff: null, parking: null };
+    // inPickup 等：到車站／出站後騎 YouBike 時使用者選的借還車站；board／alight：指定的捷運上下車站
+    const CHOICES = ['pickup', 'dropoff', 'parking', 'inPickup', 'inDropoff', 'outPickup', 'outDropoff', 'board', 'alight'];
+    const state = { mode: 'bike', ...Object.fromEntries(CHOICES.map((k) => [k, null])) };
     for (const k of ['from', 'to', 'vehicle']) $(k).addEventListener('input', () => { points[k] = null; });
-    const resetChoices = () => { state.pickup = state.dropoff = state.parking = null; };
+    const resetChoices = () => { for (const k of CHOICES) state[k] = null; };
+
+    // 到車站／出站後的接駁方式
+    const ACCESS_OPTIONS = { auto: '自動（最快）', walk: '🚶 步行', youbike: '🚲 YouBike', bus: '🚌 公車', taxi: '🚕 計程車', uber: '🚗 Uber' };
+    for (const id of ['access', 'egress']) {
+      $(id).innerHTML = Object.entries(ACCESS_OPTIONS).map(([k, v]) => `<option value="${k}">${v}</option>`).join('');
+      $(id).addEventListener('change', () => {
+        const side = id === 'access' ? 'in' : 'out';
+        state[side + 'Pickup'] = state[side + 'Dropoff'] = null;
+        if (points.from && points.to || $('from').value && $('to').value) plan();
+      });
+    }
 
     const pin = (color, text) => L.divIcon({
       className: '', iconSize: [24, 24], iconAnchor: [12, 12],
@@ -288,6 +310,11 @@
     async function planMode(from, to) {
       const params = new URLSearchParams({ from: `${from.lat},${from.lng}`, to: `${to.lat},${to.lng}` });
       if (state.mode === 'bus') return renderBus(await api('/api/bus?' + params), from, to);
+      if (['tra', 'thsr', 'metro'].includes(state.mode)) {
+        params.set('access', $('access').value);
+        params.set('egress', $('egress').value);
+        for (const k of ['inPickup', 'inDropoff', 'outPickup', 'outDropoff', 'board', 'alight']) if (state[k]) params.set(k, state[k]);
+      }
       if (state.mode === 'metro') return renderMetro(await api('/api/metro?' + params), from, to);
       if (state.mode === 'tra' || state.mode === 'thsr') {
         if ($('date').value) params.set('date', $('date').value);
@@ -655,6 +682,17 @@
     let metroResult = null;
     const lineChip = (l) => `<span class="chip" style="background:${esc(l.color || '#0284c7')}">${esc(l.route)}</span>`;
 
+    // 可改選的上車／下車站；點了就指定該站重新規劃，「自動」取消指定
+    function stationChoices(list, sel, type, title) {
+      if (!list?.length) return '';
+      return `<div class="card"><details ${state[type] ? 'open' : ''}><summary><b>${esc(title)}</b></summary>
+        ${state[type] ? `<div class="alt" data-type="${type}" data-id="">自動選擇最快的站</div>` : ''}
+        ${list.map((s) => `<div class="alt ${s.name === sel ? 'sel' : ''}" data-type="${type}" data-id="${esc(s.name)}">
+          <span>${esc(s.name)}站<br><span class="muted">${esc(s.operator)}</span></span>
+          <span class="muted">距離 ${km(s.distance)}</span></div>`).join('')}
+      </details></div>`;
+    }
+
     function renderMetro(r, from, to) {
       metroResult = { r, from, to };
       showMetro(0);
@@ -719,6 +757,8 @@
           ${navButtons}
         </div>
         ${accessCard(o.walkOut, `從${o.rides.at(-1).alight.name}站到目的地`, false)}
+        ${stationChoices(r.boardChoices, r.choice.board || o.rides[0].board.name, 'board', '改從其他站上車（例如騎 YouBike 到不用轉乘的站）')}
+        ${stationChoices(r.alightChoices, r.choice.alight || o.rides.at(-1).alight.name, 'alight', '改在其他站下車')}
         ${o.fare.total != null ? `<div class="card"><h2>💰 票價約 ${price(o.fare.total)}</h2>
           <p class="hint">單程票全票。${o.fare.split ? '跨不同系統時為各段票價相加，用電子票證可能有轉乘優惠。' : '用悠遊卡／一卡通等電子票證可能另有優惠。'}</p></div>` : ''}
         <p class="hint">時間依官方站間行駛時間與班距估算（等車抓半個班距），實際依現場為準。資料來自交通部 TDX。</p>
@@ -726,7 +766,7 @@
     }
 
     // ---------- 火車站接駁（步行／公車／YouBike／計程車） ----------
-    const ACCESS = { walk: '🚶 步行', bus: '🚌 公車', youbike: '🚲 YouBike', taxi: '🚕 計程車' };
+    const ACCESS = { walk: '🚶 步行', bus: '🚌 公車', youbike: '🚲 YouBike', taxi: '🚕 計程車', uber: '🚗 Uber' };
     const LEG_ICON = { foot: '🚶', bus: '🚌', bike: '🚲', taxi: '🚕', metro: '🚇' };
     const endOf = (leg, last) => { const [lat, lng] = last ? leg.path.at(-1) : leg.path[0]; return { lat, lng }; };
 
@@ -745,7 +785,7 @@
           title = `騎 YouBike 到還車站：${a.dropoff.name}`;
           arrive = `已到達還車站「${a.dropoff.name}」，請還車`;
         } else if (leg.mode === 'taxi') {
-          title = `搭計程車到${finalName}`;
+          title = `${a.kind === 'uber' ? '搭 Uber' : '搭計程車'}到${finalName}`;
         } else if (next?.mode === 'bus') {
           title = `步行到公車站「${next.board.name}」`;
           arrive = `已到達「${next.board.name}」站牌，請搭 ${next.route}（${next.headsign}）`;
@@ -759,15 +799,28 @@
       });
     }
 
-    // 不是走路的接駁：說明為什麼選這個方式，並列出其他方式的時間
+    // 接駁說明：自動選的說明原因並列出其他方式；指定的方式行不通時說明改用什麼；
+    // YouBike 列出附近的借／還車站，點一下就改用該站（可以只騎一段）
     function accessCard(a, label, inbound) {
-      if (a.kind === 'walk') return '';
-      const others = a.alternatives.filter((x) => x.kind !== a.kind)
+      const side = inbound ? 'in' : 'out';
+      const fallback = a.fallback ? `<div class="card demo">${esc(label)}：附近沒有合適的${ACCESS[a.fallback]}，改用${ACCESS[a.kind]}</div>` : '';
+      if (a.kind === 'walk') return fallback;
+      const others = (a.alternatives || []).filter((x) => x.kind !== a.kind)
         .map((x) => `${ACCESS[x.kind]} 約 ${min(x.duration)}`).join('・');
-      return `<div class="card"><h2>${esc(label)}：建議${ACCESS[a.kind]}（約 ${min(a.duration)}・${km(a.distance)}）</h2>
-        <div class="muted">距離太遠不適合步行。${others ? `其他方式：${others}` : ''}
+      const bikeList = (list, sel, type) => list.map((s) => `
+        <div class="alt ${s.id === sel ? 'sel' : ''}" data-type="${side}${type === 'pickup' ? 'Pickup' : 'Dropoff'}" data-id="${esc(s.id)}">
+          <span>${esc(s.name)}<br><span class="muted">距離 ${km(s.distance)}</span></span>
+          <span>${type === 'pickup' ? '可借' : '可還'} <b class="${cls(type === 'pickup' ? s.bikes : s.docks)}">${type === 'pickup' ? s.bikes : s.docks}</b></span>
+        </div>`).join('');
+      const from = inbound ? '出發點' : '車站', to = inbound ? '車站' : '目的地';
+      return `${fallback}<div class="card"><h2>${esc(label)}：${a.alternatives ? '建議' : ''}${ACCESS[a.kind]}（約 ${min(a.duration)}・${km(a.distance)}）</h2>
+        <div class="muted">${a.alternatives ? `距離太遠不適合步行。${others ? `其他方式：${others}` : ''}` : '你選的接駁方式。'}
         ${a.kind === 'bus' && !inbound ? '<br>下車後的公車等車時間為估計值，出站時請再確認到站時間。' : ''}
         ${a.kind === 'youbike' ? `<br>借車站「${esc(a.pickup.name)}」可借 ${a.pickup.bikes} 台，還車站「${esc(a.dropoff.name)}」可還 ${a.dropoff.docks} 位（現在的數字）。` : ''}</div>
+        ${a.kind === 'taxi' || a.kind === 'uber' ? `<div class="links">${uberA(endOf(a.legs[0], false), endOf(a.legs[0], true), '🚗 用 Uber 叫車這段')}</div>` : ''}
+        ${a.kind === 'youbike' && a.pickups ? `
+          <details><summary>換借車站（${from}附近有車的站）</summary>${bikeList(a.pickups, a.pickup.id, 'pickup')}</details>
+          <details><summary>換還車站（${to}附近有空位的站，可以早點還車再走路）</summary>${bikeList(a.dropoffs, a.dropoff.id, 'dropoff')}</details>` : ''}
       </div>`;
     }
 
@@ -1105,6 +1158,7 @@
       for (const b of $('tabs').children) b.classList.toggle('on', b.dataset.mode === mode);
       $('vehicleRow').hidden = mode !== 'scooter';
       $('whenRow').hidden = mode !== 'tra' && mode !== 'thsr';
+      $('accessRow').hidden = !['tra', 'thsr', 'metro'].includes(mode);
       if (points.from && points.to || $('from').value && $('to').value) {
         resetChoices();
         plan();

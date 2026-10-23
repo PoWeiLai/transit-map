@@ -310,24 +310,35 @@ const ACCESS_WALK_M = 2500;      // 再遠就不建議走路到車站
 const ACCESS_BIKE_NEAR_M = 800;  // YouBike 借還車站要在這個距離內
 const TAXI_PREFER = 3;           // 公車／YouBike 比計程車慢超過 3 倍就建議搭計程車
 
-// 起訖點與車站之間怎麼接駁。太遠時先用直線估算比較公車、YouBike、計程車，
+const ACCESS_BIKE_PICK_M = 2000; // 使用者指定騎 YouBike 時，借還車站可以遠一點
+const BIKE_CHOICES = 5;          // 列出幾個借／還車站讓使用者換
+const ACCESS_KINDS = new Set(['auto', 'walk', 'youbike', 'bus', 'taxi', 'uber']);
+
+// 起訖點與車站之間騎 YouBike：走到借車站 → 騎到還車站 → 走過去。
+// 使用者選的借／還車站（pref.pickup / pref.dropoff）在附近才採用，否則用最近有車／有位的站
+async function bikeAccess(from, to, pref, maxM) {
+  const stations = await getStations();
+  const pickups = nearest(stations, from, (s) => s.active && s.bikes > 0, BIKE_CHOICES).filter((s) => s.distance <= maxM);
+  const dropoffs = nearest(stations, to, (s) => s.active && s.docks > 0, BIKE_CHOICES).filter((s) => s.distance <= maxM);
+  const pickup = pickups.find((s) => s.id === pref.pickup) || pickups[0];
+  const dropoff = dropoffs.find((s) => s.id === pref.dropoff && s.id !== pickup?.id) || dropoffs.find((s) => s.id !== pickup?.id);
+  if (!pickup || !dropoff) return null;
+  const legs = [estimateRoute('foot', from, pickup), estimateRoute('bike', pickup, dropoff), estimateRoute('foot', dropoff, to)];
+  return { kind: 'youbike', pickup, dropoff, pickups, dropoffs, ...summarize(legs) };
+}
+
+// 自動選：近就走路；遠的話先用直線估算比較公車、YouBike、計程車，
 // 選定後再由 refine 換成實際路線，避免每個候選車站都呼叫路線服務
-async function connectRail(from, to) {
+async function autoAccess(from, to) {
   if (distance(from, to) <= ACCESS_WALK_M) return { kind: 'walk', ...summarize([await route('foot', from, to)]) };
 
   const [bus, bike] = await Promise.all([
     planBus(from, to, estimateRoute).then((list) => list[0]).catch(() => null),
-    getStations().then((stations) => {
-      const pickup = nearest(stations, from, (s) => s.active && s.bikes > 0, 1)[0];
-      const dropoff = nearest(stations, to, (s) => s.active && s.docks > 0, 1)[0];
-      if (!pickup || !dropoff || pickup.id === dropoff.id) return null;
-      if (pickup.distance > ACCESS_BIKE_NEAR_M || dropoff.distance > ACCESS_BIKE_NEAR_M) return null;
-      return { pickup, dropoff, legs: [estimateRoute('foot', from, pickup), estimateRoute('bike', pickup, dropoff), estimateRoute('foot', dropoff, to)] };
-    }).catch(() => null),
+    bikeAccess(from, to, {}, ACCESS_BIKE_NEAR_M).catch(() => null),
   ]);
   const candidates = [
     bus && { kind: 'bus', ...summarize(bus.legs, bus.total.duration) },
-    bike && { kind: 'youbike', pickup: bike.pickup, dropoff: bike.dropoff, ...summarize(bike.legs) },
+    bike,
   ].filter(Boolean).sort((a, b) => a.duration - b.duration);
   const taxi = { kind: 'taxi', ...summarize([estimateRoute('taxi', from, to)]) };
   const pick = candidates[0] && candidates[0].duration <= taxi.duration * TAXI_PREFER ? candidates[0] : taxi;
@@ -335,12 +346,41 @@ async function connectRail(from, to) {
   return { ...pick, alternatives };
 }
 
+// 接駁方式：pref = { kind: auto／walk／youbike／bus／taxi／uber, pickup, dropoff }。
+// 指定的方式行不通（例如附近沒有 YouBike）就改用自動，並標記 fallback 讓畫面說明
+function makeConnect(pref = {}) {
+  const kind = ACCESS_KINDS.has(pref.kind) ? pref.kind : 'auto';
+  const connect = async (from, to) => {
+    if (kind === 'walk') return { kind: 'walk', ...summarize([estimateRoute('foot', from, to)]) };
+    // Uber 與計程車路線相同（開車），差在畫面上給叫車按鈕
+    if (kind === 'taxi' || kind === 'uber') return { kind, ...summarize([estimateRoute('taxi', from, to)]) };
+    if (kind === 'youbike') {
+      const bike = await bikeAccess(from, to, pref, ACCESS_BIKE_PICK_M).catch(() => null);
+      if (bike) return bike;
+    }
+    if (kind === 'bus') {
+      const bus = await planBus(from, to, estimateRoute).then((list) => list[0]).catch(() => null);
+      if (bus) return { kind: 'bus', ...summarize(bus.legs, bus.total.duration) };
+    }
+    const auto = await autoAccess(from, to);
+    return kind === 'auto' ? auto : { ...auto, fallback: kind };
+  };
+  connect.refine = refineAccess;
+  return connect;
+}
+
+// 規劃 API 的接駁參數：access／egress 是到車站、出站後的方式，inPickup 等是使用者選的 YouBike 站
+const accessPrefs = (q) => ({
+  in: makeConnect({ kind: q.access, pickup: q.inPickup, dropoff: q.inDropoff }),
+  out: makeConnect({ kind: q.egress, pickup: q.outPickup, dropoff: q.outDropoff }),
+});
+
 function summarize(legs, duration = legs.reduce((n, l) => n + l.duration, 0)) {
   return { legs, duration: Math.round(duration), distance: legs.reduce((n, l) => n + l.distance, 0) };
 }
 
 // 把估算的步行／騎車／計程車段換成實際路線；公車的等車時間保留
-connectRail.refine = async (a) => {
+async function refineAccess(a) {
   if (!a.legs.some((l) => l.estimated)) return a;
   const legs = await Promise.all(a.legs.map(async (l) => {
     if (!l.estimated) return l;
@@ -350,7 +390,7 @@ connectRail.refine = async (a) => {
   }));
   const diff = legs.reduce((n, l, i) => n + l.duration - a.legs[i].duration, 0);
   return { ...a, ...summarize(legs, a.duration + diff) };
-};
+}
 
 // ---------- API ----------
 
@@ -476,7 +516,7 @@ app.get('/api/rail', wrap(async (req, res) => {
   if (!hasTdx()) return res.status(503).json({ error: '伺服器尚未設定 TDX 金鑰，無法查詢火車時刻' });
   const when = parseWhen(req.query.date, req.query.time);
   if (when.error) return res.status(400).json({ error: when.error });
-  res.json(await planRail(req.query.system === 'thsr' ? 'thsr' : 'tra', from, to, connectRail, when));
+  res.json(await planRail(req.query.system === 'thsr' ? 'thsr' : 'tra', from, to, accessPrefs(req.query), when));
 }));
 
 // 全台捷運／輕軌：接駁到車站 → 搭捷運（可轉乘） → 接駁到目的地
@@ -484,7 +524,7 @@ app.get('/api/metro', wrap(async (req, res) => {
   const from = parsePoint(req.query.from);
   const to = parsePoint(req.query.to);
   if (!from || !to) return res.status(400).json({ error: '請提供出發點與目的地' });
-  res.json(await planMetro(from, to, connectRail));
+  res.json(await planMetro(from, to, accessPrefs(req.query), { board: req.query.board, alight: req.query.alight }));
 }));
 
 app.get('/api/metro/map', (req, res) => res.json(metroMap()));
