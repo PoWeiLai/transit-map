@@ -3,7 +3,7 @@ import express from 'express';
 import { distance } from './geo.js';
 import { planBus, nearbyArrivals, warmUp } from './bus.js';
 import { nearbyParking, warmUp as warmUpParking } from './scooter.js';
-import { planRail, warmUp as warmUpRail } from './rail.js';
+import { planRail, railStations, warmUp as warmUpRail } from './rail.js';
 import { hasTdx } from './tdx.js';
 
 // TDX 金鑰等設定放在 .env（不進版控）
@@ -28,7 +28,7 @@ const EXIT_RADIUS_M = 400;
 const USER_AGENT = 'ubike-planner/1.0 (local dev)';
 const STATION_CACHE_MS = 60 * 1000;
 // 路線服務失敗時用直線距離估算
-const FALLBACK_SPEED = { foot: 4.5 / 3.6, bike: 12 / 3.6, scooter: 25 / 3.6 }; // m/s
+const FALLBACK_SPEED = { foot: 4.5 / 3.6, bike: 12 / 3.6, scooter: 25 / 3.6, taxi: 30 / 3.6 }; // m/s
 const CANDIDATES = 3;
 
 // ---------- 站點資料 ----------
@@ -285,6 +285,10 @@ async function fetchRoute(mode, from, to) {
       if (err instanceof ProviderDown) p.downUntil = Date.now() + PROVIDER_COOLDOWN_MS;
     }
   }
+  return estimateRoute(mode, from, to);
+}
+
+function estimateRoute(mode, from, to) {
   const d = distance(from, to) * 1.3; // 直線距離 × 1.3 粗估實際路程
   return {
     mode,
@@ -298,6 +302,54 @@ async function fetchRoute(mode, from, to) {
     estimated: true,
   };
 }
+
+// ---------- 火車站接駁 ----------
+
+const ACCESS_WALK_M = 2500;      // 再遠就不建議走路到車站
+const ACCESS_BIKE_NEAR_M = 800;  // YouBike 借還車站要在這個距離內
+const TAXI_PREFER = 3;           // 公車／YouBike 比計程車慢超過 3 倍就建議搭計程車
+
+// 起訖點與車站之間怎麼接駁。太遠時先用直線估算比較公車、YouBike、計程車，
+// 選定後再由 refine 換成實際路線，避免每個候選車站都呼叫路線服務
+async function connectRail(from, to) {
+  if (distance(from, to) <= ACCESS_WALK_M) return { kind: 'walk', ...summarize([await route('foot', from, to)]) };
+
+  const [bus, bike] = await Promise.all([
+    planBus(from, to, estimateRoute).then((list) => list[0]).catch(() => null),
+    getStations().then((stations) => {
+      const pickup = nearest(stations, from, (s) => s.active && s.bikes > 0, 1)[0];
+      const dropoff = nearest(stations, to, (s) => s.active && s.docks > 0, 1)[0];
+      if (!pickup || !dropoff || pickup.id === dropoff.id) return null;
+      if (pickup.distance > ACCESS_BIKE_NEAR_M || dropoff.distance > ACCESS_BIKE_NEAR_M) return null;
+      return { pickup, dropoff, legs: [estimateRoute('foot', from, pickup), estimateRoute('bike', pickup, dropoff), estimateRoute('foot', dropoff, to)] };
+    }).catch(() => null),
+  ]);
+  const candidates = [
+    bus && { kind: 'bus', ...summarize(bus.legs, bus.total.duration) },
+    bike && { kind: 'youbike', pickup: bike.pickup, dropoff: bike.dropoff, ...summarize(bike.legs) },
+  ].filter(Boolean).sort((a, b) => a.duration - b.duration);
+  const taxi = { kind: 'taxi', ...summarize([estimateRoute('taxi', from, to)]) };
+  const pick = candidates[0] && candidates[0].duration <= taxi.duration * TAXI_PREFER ? candidates[0] : taxi;
+  const alternatives = [...candidates, taxi].map(({ kind, duration }) => ({ kind, duration }));
+  return { ...pick, alternatives };
+}
+
+function summarize(legs, duration = legs.reduce((n, l) => n + l.duration, 0)) {
+  return { legs, duration: Math.round(duration), distance: legs.reduce((n, l) => n + l.distance, 0) };
+}
+
+// 把估算的步行／騎車／計程車段換成實際路線；公車的等車時間保留
+connectRail.refine = async (a) => {
+  if (!a.legs.some((l) => l.estimated)) return a;
+  const legs = await Promise.all(a.legs.map(async (l) => {
+    if (!l.estimated) return l;
+    const [s, e] = [l.path[0], l.path.at(-1)].map(([lat, lng]) => ({ lat, lng }));
+    const real = await route(l.mode === 'taxi' ? 'scooter' : l.mode, s, e);
+    return { ...real, mode: l.mode };
+  }));
+  const diff = legs.reduce((n, l, i) => n + l.duration - a.legs[i].duration, 0);
+  return { ...a, ...summarize(legs, a.duration + diff) };
+};
 
 // ---------- API ----------
 
@@ -415,13 +467,19 @@ app.get('/api/scooter', wrap(async (req, res) => {
   });
 }));
 
-// 台鐵（system=tra）／高鐵（system=thsr）：步行到車站 → 搭車 → 步行到目的地
+// 台鐵（system=tra）／高鐵（system=thsr）：接駁到車站 → 搭車 → 接駁到目的地
 app.get('/api/rail', wrap(async (req, res) => {
   const from = parsePoint(req.query.from);
   const to = parsePoint(req.query.to);
   if (!from || !to) return res.status(400).json({ error: '請提供出發點與目的地' });
   if (!hasTdx()) return res.status(503).json({ error: '伺服器尚未設定 TDX 金鑰，無法查詢火車時刻' });
-  res.json(await planRail(req.query.system === 'thsr' ? 'thsr' : 'tra', from, to, route));
+  res.json(await planRail(req.query.system === 'thsr' ? 'thsr' : 'tra', from, to, connectRail));
+}));
+
+// 車站位置（地圖上標示高鐵站用）
+app.get('/api/rail/stations', wrap(async (req, res) => {
+  if (!hasTdx()) return res.status(503).json({ error: '伺服器尚未設定 TDX 金鑰' });
+  res.json(await railStations(req.query.system === 'tra' ? 'tra' : 'thsr'));
 }));
 
 app.listen(PORT, () => {

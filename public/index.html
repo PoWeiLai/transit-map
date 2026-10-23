@@ -80,6 +80,11 @@
     .chip { background:#16a34a; color:#fff; border-radius:6px; padding:1px 7px; font-weight:700; font-size:14px; }
     .chip.walk { background:transparent; color:var(--muted); font-weight:400; padding:0; }
     .eta-now { color:var(--ok); font-weight:700; }
+    .seat { font-size:12px; border-radius:6px; padding:1px 6px; border:1px solid currentColor; }
+    .seat.O { color:var(--ok); } .seat.L { color:#d97706; } .seat.X { color:var(--warn); text-decoration:line-through; }
+    .fares { width:100%; border-collapse:collapse; font-size:13px; margin-top:4px; }
+    .fares th, .fares td { padding:4px 6px; border-top:1px solid var(--line); text-align:right; }
+    .fares th:first-child, .fares td:first-child { text-align:left; font-weight:400; color:var(--muted); }
     .pin { border-radius:50%; border:2px solid #fff; box-shadow:0 0 3px rgba(0,0,0,.5);
            color:#fff; font:700 11px/20px system-ui; text-align:center; }
     @media (max-width: 760px) {
@@ -161,6 +166,20 @@
       className: '', iconSize: [24, 24], iconAnchor: [12, 12],
       html: `<div class="pin" style="background:${color};width:24px;height:24px;line-height:20px">${text}</div>`,
     });
+
+    // 高鐵站一直標在地圖上（不隨規劃結果清除），點一下可設為出發點或目的地
+    const stationLayer = L.layerGroup().addTo(map);
+    fetch('/api/rail/stations?system=thsr').then((r) => (r.ok ? r.json() : [])).then((list) => {
+      for (const s of list) {
+        const name = `${s.name}站`;
+        const box = document.createElement('div');
+        box.innerHTML = `<b>🚄 ${esc(name)}</b><br><button data-k="from">設為出發點</button> <button data-k="to">設為目的地</button>`;
+        box.addEventListener('click', (ev) => {
+          if (ev.target.dataset.k) setPoint(ev.target.dataset.k, { lat: s.lat, lng: s.lng, name }, name);
+        });
+        L.marker([s.lat, s.lng], { icon: pin('#ea580c', '高'), zIndexOffset: -100 }).bindPopup(box).addTo(stationLayer);
+      }
+    }).catch(() => {}); // 沒有 TDX 金鑰時就不標示
 
     // 小螢幕時結果在地圖下方，要捲過去才看得到
     function show(html) {
@@ -261,7 +280,7 @@
     const stationName = (e) => (e.station.endsWith('站') ? e.station : e.station + '站');
     const exitNo = (e) => (e.exit === '0' ? '出口' : `${e.exit} 號出口`);
 
-    const GMODE = { foot: 'walking', bike: 'bicycling', bus: 'transit', train: 'transit', scooter: 'driving' };
+    const GMODE = { foot: 'walking', bike: 'bicycling', bus: 'transit', train: 'transit', scooter: 'driving', taxi: 'driving' };
     const TRANSIT = new Set(['bus', 'train']); // 坐車的段：步驟是沿途各站
     function gmaps(from, to, mode) {
       return 'https://www.google.com/maps/dir/?api=1&' + new URLSearchParams({
@@ -351,6 +370,7 @@
       bus: { color: '#16a34a', weight: 6 },
       scooter: { color: '#7c3aed', weight: 6 },
       train: { color: '#0f766e', weight: 6 },
+      taxi: { color: '#ca8a04', weight: 5 },
     };
 
     function drawLegs(legs, from, to) {
@@ -493,24 +513,30 @@
       layer.clearLayers();
 
       const stages = [
-        !t.walkIn.far && { leg: t.walkIn, from, to: t.origin, icon: '🚶', title: `步行到${t.origin.name}站`,
-          arrive: `已到達${t.origin.name}站，請搭 ${t.type} ${t.no}（${t.dep} 開）` },
+        ...accessStages(t.walkIn, t.origin, `${t.origin.name}站`,
+          `已到達${t.origin.name}站，請搭 ${t.type} ${t.no}（${t.dep} 開）`, true),
         { leg: t.leg, from: t.origin, to: t.dest, icon: r.system === 'thsr' ? '🚄' : '🚆',
           title: `${t.type} ${t.no}（${t.headsign}）到${t.dest.name}`, arrive: `到站了！請在${t.dest.name}站下車` },
-        !t.walkOut.far && { leg: t.walkOut, from: t.dest, to, icon: '🚶', title: `步行到目的地：${to.name}`, arrive: '🎉 已抵達目的地' },
-      ].filter(Boolean);
+        ...accessStages(t.walkOut, to, `目的地：${to.name}`, '🎉 已抵達目的地', false),
+      ];
       current = { stages, from, to };
       drawLegs(stages.map((s) => s.leg), from, to);
       map.fitBounds(L.featureGroup(layer.getLayers()).getBounds(), { padding: [30, 30] });
 
-      const far = (a, s, dir) => (a.far
-        ? `<div class="card demo">⚠️ ${dir === 'in' ? '出發點離' : '目的地離'}${esc(s.name)}站約 ${km(a.distance)}，太遠不適合步行，建議改搭公車、YouBike 或計程車${dir === 'in' ? '前往' : ''}。</div>`
-        : '');
       const delay = (x) => (x.delay ? `<span class="low">誤點 ${x.delay} 分</span>` : '');
       const visible = r.trains.map((x, i) => [x, i]).filter(([x]) => TRAIN_FILTERS[filter].test(x));
-      const detail = (st) => (st.leg === t.leg
-        ? `搭 ${trainChip(t)} ${esc(t.headsign)}<br>${esc(t.origin.name)} ${esc(t.dep)} 開 → ${esc(t.dest.name)} ${esc(t.arr)} 到 ${delay(t)}<br>`
-        : `${esc(st.title)}<br>`);
+      const detail = (st) => {
+        const l = st.leg;
+        if (l === t.leg) {
+          return `搭 ${trainChip(t)} ${esc(t.headsign)}<br>${esc(t.origin.name)} ${esc(t.dep)} 開 → ${esc(t.dest.name)} ${esc(t.arr)} 到 ${delay(t)}<br>`;
+        }
+        if (l.mode === 'bus') {
+          return `搭 <span class="chip">${esc(l.route)}</span> ${esc(l.headsign)}<br>
+            「${esc(l.board.name)}」上車 → 「${esc(l.alight.name)}」下車<br>${st.inbound ? etaHtml(l) + '<br>' : ''}`;
+        }
+        return `${esc(st.title)}<br>`;
+      };
+      const est = stages.some((s) => s.leg.estimated) ? '<p class="hint">※ 部分路線服務無回應，為直線距離估算</p>' : '';
 
       show(`
         ${r.suspendedCount ? `<div class="card demo">今天這段有 ${r.suspendedCount} 班${esc(r.label)}停駛，以下只列出有行駛的班次。</div>` : ''}
@@ -518,19 +544,90 @@
           `<button type="button" data-filter="${k}" class="${k === filter ? 'on' : ''}">${f.label}</button>`).join('')}</div>` : ''}
         ${visible.length ? visible.map(([x, i]) => `
           <div class="card opt ${i === idx ? 'sel' : ''}" data-train="${i}">
-            <div class="chips">${trainChip(x)} <b>${esc(x.dep)} → ${esc(x.arr)}</b> ${delay(x)}</div>
-            <div class="muted">${esc(x.origin.name)} → ${esc(x.dest.name)}・${x.minutes} 分・停 ${x.stopCount} 站・抵達目的地約 ${hhmm(x.reach)}</div>
+            <div class="chips">${trainChip(x)} <b>${esc(x.dep)} → ${esc(x.arr)}</b> ${delay(x)}
+              ${x.seats ? seatHtml(x.seats) : r.system === 'thsr' ? '<span class="muted">座位：無資料</span>' : ''}</div>
+            <div class="muted">${esc(x.origin.name)} → ${esc(x.dest.name)}・${x.minutes} 分・停 ${x.stopCount} 站${x.fare?.full.standard ? `・標準 ${price(x.fare.full.standard)}` : ''}・抵達目的地約 ${hhmm(x.reach)}</div>
           </div>`).join('') : '<div class="card muted">這個車種接下來沒有班次</div>'}
-        ${far(t.walkIn, t.origin, 'in')}
+        ${accessCard(t.walkIn, `到${t.origin.name}站`, true)}
         <div class="card">
           <h2>路線說明</h2>
           ${stages.map((st, i) => stageHtml(st, i, detail(st))).join('')}
           ${t.note ? `<p class="hint">備註：${esc(t.note)}</p>` : ''}
+          ${est}
           ${navButtons}
         </div>
-        ${far(t.walkOut, t.dest, 'out')}
-        <p class="hint">時刻來自交通部 TDX，依抵達目的地時間排序。${r.system === 'tra' ? '誤點資訊每 2 分鐘更新。' : ''}</p>
+        ${accessCard(t.walkOut, `從${t.dest.name}站到目的地`, false)}
+        ${fareCard(t)}
+        <p class="hint">時刻來自交通部 TDX，依抵達目的地時間排序。${r.system === 'tra' ? '誤點資訊每 2 分鐘更新。' : '剩餘座位每 5 分鐘更新。'}</p>
       `);
+    }
+
+    // ---------- 火車站接駁（步行／公車／YouBike／計程車） ----------
+    const ACCESS = { walk: '🚶 步行', bus: '🚌 公車', youbike: '🚲 YouBike', taxi: '🚕 計程車' };
+    const LEG_ICON = { foot: '🚶', bus: '🚌', bike: '🚲', taxi: '🚕' };
+    const endOf = (leg, last) => { const [lat, lng] = last ? leg.path.at(-1) : leg.path[0]; return { lat, lng }; };
+
+    // 接駁拆成導航的每一段；最後一段的終點是 finalTo，到達時提示 finalArrive
+    function accessStages(a, finalTo, finalName, finalArrive, inbound) {
+      return a.legs.map((leg, i) => {
+        const next = a.legs[i + 1];
+        const last = !next;
+        const from = leg.mode === 'bus' ? leg.board : endOf(leg, false);
+        const to = last ? finalTo : leg.mode === 'bus' ? leg.alight : next.mode === 'bus' ? next.board : endOf(leg, true);
+        let title, arrive;
+        if (leg.mode === 'bus') {
+          title = `搭 ${leg.route}（${leg.headsign}）到「${leg.alight.name}」`;
+          arrive = `請在「${leg.alight.name}」下車 🔔`;
+        } else if (leg.mode === 'bike') {
+          title = `騎 YouBike 到還車站：${a.dropoff.name}`;
+          arrive = `已到達還車站「${a.dropoff.name}」，請還車`;
+        } else if (leg.mode === 'taxi') {
+          title = `搭計程車到${finalName}`;
+        } else if (next?.mode === 'bus') {
+          title = `步行到公車站「${next.board.name}」`;
+          arrive = `已到達「${next.board.name}」站牌，請搭 ${next.route}（${next.headsign}）`;
+        } else if (next?.mode === 'bike') {
+          title = `步行到借車站：${a.pickup.name}`;
+          arrive = `已到達借車站「${a.pickup.name}」，請借車 🚲`;
+        } else {
+          title = `步行到${finalName}`;
+        }
+        return { leg, from, to, icon: LEG_ICON[leg.mode], title, arrive: last ? finalArrive : arrive, inbound };
+      });
+    }
+
+    // 不是走路的接駁：說明為什麼選這個方式，並列出其他方式的時間
+    function accessCard(a, label, inbound) {
+      if (a.kind === 'walk') return '';
+      const others = a.alternatives.filter((x) => x.kind !== a.kind)
+        .map((x) => `${ACCESS[x.kind]} 約 ${min(x.duration)}`).join('・');
+      return `<div class="card"><h2>${esc(label)}：建議${ACCESS[a.kind]}（約 ${min(a.duration)}・${km(a.distance)}）</h2>
+        <div class="muted">距離太遠不適合步行。${others ? `其他方式：${others}` : ''}
+        ${a.kind === 'bus' && !inbound ? '<br>下車後的公車等車時間為估計值，出站時請再確認到站時間。' : ''}
+        ${a.kind === 'youbike' ? `<br>借車站「${esc(a.pickup.name)}」可借 ${a.pickup.bikes} 台，還車站「${esc(a.dropoff.name)}」可還 ${a.dropoff.docks} 位（現在的數字）。` : ''}</div>
+      </div>`;
+    }
+
+    // ---------- 高鐵票價與座位 ----------
+    const SEAT = { O: '有位', L: '少量', X: '售完' };
+    const price = (n) => `$${Number(n).toLocaleString('en-US')}`;
+    const seatHtml = (s) => (s ? ['standard', 'business'].filter((k) => SEAT[s[k]])
+      .map((k) => `<span class="seat ${s[k]}">${k === 'standard' ? '標準' : '商務'} ${SEAT[s[k]]}</span>`).join(' ') : '');
+
+    function fareCard(t) {
+      if (!t.fare) return '';
+      const cell = (n) => `<td>${n ? price(n) : '—'}</td>`;
+      const row = (name, f) => `<tr><td>${name}</td>${cell(f.standard)}${cell(f.business)}${cell(f.free)}</tr>`;
+      return `<div class="card"><h2>💰 票價：${esc(t.origin.name)} → ${esc(t.dest.name)}</h2>
+        ${t.seats ? `<div class="chips">${esc(t.no)} 次剩餘座位：${seatHtml(t.seats)}</div>` : ''}
+        <table class="fares">
+          <tr><th></th><th>標準車廂</th><th>商務車廂</th><th>自由座</th></tr>
+          ${row('全票', t.fare.full)}
+          ${row('優待（孩童／敬老／愛心）', t.fare.concession)}
+        </table>
+        <p class="hint">單程票價。自由座不劃位，不保證有座位；早鳥、大學生等優惠請見官網。</p>
+        <div class="links"><a target="_blank" rel="noopener" href="https://irs.thsrc.com.tw/IMINT/">🎫 前往高鐵訂票</a></div>
+      </div>`;
     }
 
     // ---------- 共享機車 ----------
@@ -876,13 +973,17 @@
       box.addEventListener('click', (ev) => {
         const k = ev.target.dataset.k;
         if (!k) return;
-        points[k] = { lat, lng, name: k === 'vehicle' ? '取車位置' : '地圖選點' };
-        $(k).value = label;
-        map.closePopup();
-        if (points.from && points.to) { resetChoices(); plan(); }
+        setPoint(k, { lat, lng, name: k === 'vehicle' ? '取車位置' : '地圖選點' }, label);
       });
       L.popup().setLatLng(e.latlng).setContent(box).openOn(map);
     });
+
+    function setPoint(k, point, label) {
+      points[k] = point;
+      $(k).value = label;
+      map.closePopup();
+      if (points.from && points.to) { resetChoices(); plan(); }
+    }
   </script>
 </body>
 </html>
