@@ -407,6 +407,17 @@ app.get('/api/geocode', wrap(async (req, res) => {
 }));
 
 // 規劃：出發點 → 步行到最近有車的站 → 騎到離目的地最近有空位的站 → 步行到目的地
+// 全程走路
+const MAX_WALK_M = 30000;
+app.get('/api/walk', wrap(async (req, res) => {
+  const from = parsePoint(req.query.from);
+  const to = parsePoint(req.query.to);
+  if (!from || !to) return res.status(400).json({ error: '請提供出發點與目的地' });
+  if (distance(from, to) > MAX_WALK_M) return res.status(400).json({ error: '距離超過 30 公里，不適合全程走路' });
+  const leg = await route('foot', from, to);
+  res.json({ legs: [leg], total: { distance: leg.distance, duration: leg.duration } });
+}));
+
 app.get('/api/plan', wrap(async (req, res) => {
   const from = parsePoint(req.query.from);
   const to = parsePoint(req.query.to);

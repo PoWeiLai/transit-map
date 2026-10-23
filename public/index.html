@@ -109,7 +109,8 @@
     </div>
     <form id="form">
       <div class="tabs" id="tabs">
-        <button type="button" data-mode="bike" class="on">🚲 YouBike</button>
+        <button type="button" data-mode="walk">🚶 步行</button>
+        <button type="button" data-mode="bike" class="on">🚲 YouBike 全程騎</button>
         <button type="button" data-mode="bus">🚌 公車</button>
         <button type="button" data-mode="scooter">🛵 共享機車</button>
         <button type="button" data-mode="tra">🚆 台鐵</button>
@@ -309,6 +310,7 @@
 
     async function planMode(from, to) {
       const params = new URLSearchParams({ from: `${from.lat},${from.lng}`, to: `${to.lat},${to.lng}` });
+      if (state.mode === 'walk') return renderWalk(await api('/api/walk?' + params), from, to);
       if (state.mode === 'bus') return renderBus(await api('/api/bus?' + params), from, to);
       if (['tra', 'thsr', 'metro'].includes(state.mode)) {
         params.set('access', $('access').value);
@@ -442,6 +444,7 @@
         <div class="card">
           <div class="muted">全程約</div>
           <div class="big">${min(p.total.duration)}・${km(p.total.distance)}</div>
+          <div class="muted">${exercise(p.legs)}</div>
           ${stages.map((st, i) => stageHtml(st, i,
             st.leg === walk1 ? `${exit ? `從 <b>${esc(stationName(exit))} ${esc(exitNo(exit))}</b> 出站，` : ''}步行到 <b>${esc(p.pickup.name)}</b> 借車（可借 <b class="${cls(p.pickup.bikes)}">${p.pickup.bikes}</b> 台）<br>`
             : st.leg === ride ? `騎到 <b>${esc(p.dropoff.name)}</b> 還車（可還 <b class="${cls(p.dropoff.docks)}">${p.dropoff.docks}</b> 位）<br>`
@@ -458,6 +461,34 @@
         <div class="card"><h2>目的地附近可還車站點</h2>${alt(p.dropoffs, p.dropoff.id, 'dropoff')}</div>
         <p class="hint">點選其他站點可改用該站重新規劃。資料更新：${esc(p.pickup.updatedAt)}</p>
       `);
+    }
+
+    // ---------- 全程走路 ----------
+    function renderWalk(p, from, to) {
+      stopNav();
+      layer.clearLayers();
+      const leg = p.legs[0];
+      current = { stages: [{ leg, from, to, icon: '🚶', title: `步行到目的地：${to.name}`, arrive: '🎉 已抵達目的地' }], from, to };
+      drawLegs(p.legs, from, to);
+      map.fitBounds(L.featureGroup(layer.getLayers()).getBounds(), { padding: [30, 30] });
+      show(`
+        <div class="card">
+          <div class="muted">全程走路約</div>
+          <div class="big">${min(p.total.duration)}・${km(p.total.distance)}</div>
+          <div class="muted">${exercise(p.legs)}</div>
+          ${stageHtml(current.stages[0], 0, `步行到 <b>${esc(to.name)}</b><br>`)}
+          ${leg.estimated ? '<p class="hint">※ 路線服務無回應，為直線距離估算</p>' : ''}
+          ${navButtons}
+        </div>`);
+    }
+
+    // 運動量：走路約每公里 50 大卡、騎腳踏車約每公里 25 大卡（以 60 公斤估算），走路另算步數（步幅約 0.7 公尺）
+    function exercise(legs) {
+      const walk = legs.filter((l) => l.mode === 'foot').reduce((n, l) => n + l.distance, 0);
+      const bike = legs.filter((l) => l.mode === 'bike').reduce((n, l) => n + l.distance, 0);
+      const kcal = Math.round((walk / 1000) * 50 + (bike / 1000) * 25);
+      const parts = [walk && `走路 ${km(walk)}（約 ${Math.round(walk / 0.7).toLocaleString()} 步）`, bike && `騎車 ${km(bike)}`].filter(Boolean);
+      return `🔥 運動量：${parts.join('、')}，約消耗 ${kcal} 大卡（以 60 公斤估算）`;
     }
 
     // ---------- 共用：每一段的說明與地圖線 ----------
