@@ -123,22 +123,30 @@ const TAIWAN_BBOX = '119.3,21.8,122.1,25.4'; // 經度、緯度範圍
 const NOMINATIM_COOLDOWN_MS = 10 * 60 * 1000;
 let nominatimDownUntil = 0;
 
-async function nominatim(q) {
-  const url = `${NOMINATIM_URL}?${new URLSearchParams({
-    q,
-    format: 'jsonv2',
-    countrycodes: 'tw',
-    limit: '5',
-    'accept-language': 'zh-TW',
-  })}`;
+// 道路類的結果（公車站牌在地圖資料裡也算 highway，不算道路）
+const ROAD_TYPES = new Set(['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential',
+  'service', 'living_street', 'pedestrian', 'footway', 'path', 'cycleway', 'track', 'road', 'motorway_link', 'trunk_link',
+  'primary_link', 'secondary_link', 'tertiary_link']);
+
+// near：使用者的出發點，查詢時優先找附近的地點
+async function nominatim(q, near) {
+  const params = { q, format: 'jsonv2', countrycodes: 'tw', limit: '5', 'accept-language': 'zh-TW' };
+  if (near) params.viewbox = [near.lng - 0.3, near.lat + 0.3, near.lng + 0.3, near.lat - 0.3].join(',');
+  const url = `${NOMINATIM_URL}?${new URLSearchParams(params)}`;
   const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(10000) });
   if (!res.ok) throw new Error(`Nominatim ${res.status}`);
-  return (await res.json()).map((r) => ({
-    name: r.name || r.display_name.split(',')[0],
-    label: r.display_name,
-    lat: Number(r.lat),
-    lng: Number(r.lon),
-  }));
+  return (await res.json()).map((r) => {
+    const parts = r.display_name.split(', ');
+    return {
+      name: r.name || parts[0],
+      label: r.display_name,
+      lat: Number(r.lat),
+      lng: Number(r.lon),
+      // 行政區（顯示用，讓使用者看出查到的是哪裡）：「…, 信義區, 臺北市, …」取區，沒有就取市
+      area: parts.find((x) => /[區鄉鎮]$/.test(x)) || parts.find((x) => /[市縣]$/.test(x)),
+      road: r.category === 'highway' && ROAD_TYPES.has(r.type),
+    };
+  });
 }
 
 // Photon 查不到「台北市信義區信義路五段7號」這種縣市區寫在前面的地址，
@@ -147,9 +155,9 @@ async function nominatim(q) {
 const AREA = /^([臺台]?[^\d\s,]{1,2}[市縣])?([^\d\s,]{1,3}?[區鄉鎮])?(.+)$/;
 const sameText = (a, b) => Boolean(a && b) && a.replace(/臺/g, '台') === b.replace(/臺/g, '台');
 
-async function photon(q) {
+async function photon(q, near) {
   const [, city, district, rest] = q.replace(/\s+/g, '').match(AREA) || [];
-  if (!city && !district) return photonOnce(q);
+  if (!city && !district) return photonOnce(q, near);
   const area = [district, city].filter(Boolean).join(', ');
   const number = rest.match(/(\d+)號/)?.[1];
   const road = rest.replace(/\d+號.*$/, '');
@@ -164,8 +172,10 @@ async function photon(q) {
   return [];
 }
 
-async function photonOnce(q) {
-  const url = `${PHOTON_URL}?${new URLSearchParams({ q, limit: '5', bbox: TAIWAN_BBOX })}`;
+async function photonOnce(q, near) {
+  const params = { q, limit: '5', bbox: TAIWAN_BBOX };
+  if (near) Object.assign(params, { lat: near.lat, lon: near.lng });
+  const url = `${PHOTON_URL}?${new URLSearchParams(params)}`;
   const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(10000) });
   if (!res.ok) throw new Error(`地址查詢失敗 ${res.status}`);
   return (await res.json()).features.map(({ properties: p, geometry }) => {
@@ -176,24 +186,41 @@ async function photonOnce(q) {
       lat: geometry.coordinates[1],
       lng: geometry.coordinates[0],
       city: p.city, district: p.district, street: p.street, housenumber: p.housenumber,
+      area: p.district || p.city,
+      road: p.osm_key === 'highway' && ROAD_TYPES.has(p.osm_value),
     };
   });
 }
 
-function geocode(q) {
-  if (geocodeCache.has(q)) return Promise.resolve(geocodeCache.get(q));
+// 常見簡稱：「101」在地圖資料裡是台 101 線公路
+const ALIASES = { 101: '台北101' };
+
+// 排序：名稱相符的優先、道路排後面（例如「101」查到台 101 線）、離出發點近的優先；
+// 兩個服務常查到同一個地點，100 公尺內只留一個
+function rank(results, q, near) {
+  const score = (r) => (r.name === q ? -10 : r.name?.includes(q) ? -3 : 0) + (r.road ? 20 : 0)
+    + (near ? distance(near, r) / 1000 : 0);
+  const sorted = results.map((r) => ({ r, s: score(r) })).sort((a, b) => a.s - b.s).map((x) => x.r);
+  return sorted.filter((r, i) => !sorted.slice(0, i).some((x) => distance(x, r) < 100));
+}
+
+function geocode(text, near) {
+  const q = ALIASES[text] || text;
+  const key = near ? `${q}@${near.lat.toFixed(1)},${near.lng.toFixed(1)}` : q;
+  if (geocodeCache.has(key)) return Promise.resolve(geocodeCache.get(key));
   const job = geocodeQueue.then(async () => {
-    let results = null;
+    let found = [];
     if (Date.now() >= nominatimDownUntil) {
       try {
-        results = await nominatim(q);
+        found = await nominatim(q, near);
       } catch {
         nominatimDownUntil = Date.now() + NOMINATIM_COOLDOWN_MS;
       }
     }
-    // Nominatim 不能用、或查不到時，再問 Photon
-    if (!results?.length) results = await photon(q);
-    geocodeCache.set(q, results);
+    // 兩個服務的結果合在一起排序；Nominatim 不能用時只靠 Photon
+    found = found.concat(await photon(q, near).catch(() => []));
+    const results = rank(found, q, near).slice(0, 5);
+    geocodeCache.set(key, results);
     return results;
   });
   geocodeQueue = job.catch(() => {}).then(() => new Promise((r) => setTimeout(r, 1000)));
@@ -370,6 +397,7 @@ const ACCESS_WALK_M = 2500;      // 再遠就不建議走路到車站
 const ACCESS_BIKE_NEAR_M = 800;  // YouBike 借還車站要在這個距離內
 const TAXI_PREFER = 3;           // 公車／YouBike 比計程車慢超過 3 倍就建議搭計程車
 
+const SHORT_WALK_M = 400;         // 沒開步行時，這麼近還是走路
 const ACCESS_BIKE_PICK_M = 2000; // 使用者指定騎 YouBike 時，借還車站可以遠一點
 const BIKE_CHOICES = 5;          // 列出幾個借／還車站讓使用者換
 const ACCESS_KINDS = new Set(['auto', 'walk', 'youbike', 'bus', 'taxi', 'uber']);
@@ -392,7 +420,10 @@ async function bikeAccess(from, to, pref, maxM) {
 // allow：使用者開啟的交通工具（youbike／bus／uber），沒給就全部可用；都不能用時只好走路
 async function autoAccess(from, to, allow) {
   const ok = (k) => !allow || allow.has(k);
-  if (distance(from, to) <= ACCESS_WALK_M) return { kind: 'walk', ...summarize([await route('foot', from, to)]) };
+  const d = distance(from, to);
+  // 沒開「步行」時，只有很近才走路，其他用開啟的工具（例如叫 Uber 到捷運站）
+  const walkOk = ok('walk') ? d <= ACCESS_WALK_M : d <= SHORT_WALK_M;
+  if (walkOk) return { kind: 'walk', ...summarize([await route('foot', from, to)]) };
 
   const [bus, bike] = await Promise.all([
     ok('bus') && planBus(from, to, estimateRoute).then((list) => list[0]).catch(() => null),
@@ -407,7 +438,9 @@ async function autoAccess(from, to, allow) {
     return { ...candidates[0], alternatives: candidates.map(({ kind, duration }) => ({ kind, duration })) };
   }
   const taxi = { kind: allow ? 'uber' : 'taxi', ...summarize([estimateRoute('taxi', from, to)]) };
-  const pick = candidates[0] && candidates[0].duration <= taxi.duration * TAXI_PREFER ? candidates[0] : taxi;
+  // 有開步行時 Uber 只在其他方式慢很多時才建議；沒開步行就直接比快慢
+  const prefer = ok('walk') ? TAXI_PREFER : 1;
+  const pick = candidates[0] && candidates[0].duration <= taxi.duration * prefer ? candidates[0] : taxi;
   const alternatives = [...candidates, taxi].map(({ kind, duration }) => ({ kind, duration }));
   return { ...pick, alternatives };
 }
@@ -473,7 +506,7 @@ const wrap = (fn) => (req, res) =>
 app.get('/api/geocode', wrap(async (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: '請輸入地點' });
-  res.json(await geocode(q));
+  res.json(await geocode(q, parsePoint(req.query.near)));
 }));
 
 // 規劃：出發點 → 步行到最近有車的站 → 騎到離目的地最近有空位的站 → 步行到目的地

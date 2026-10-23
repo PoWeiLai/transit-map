@@ -186,7 +186,7 @@
     // 已確認的座標；使用者改了文字就清掉，重新查詢
     const points = { from: null, vehicle: null };
     // 選的借還車站、停車場、捷運上下車站（只套用在目前看的那一段）
-    const CHOICES = ['pickup', 'dropoff', 'parking', 'inPickup', 'inDropoff', 'outPickup', 'outDropoff', 'board', 'alight'];
+    const CHOICES = ['pickup', 'dropoff', 'parking', 'access', 'egress', 'inPickup', 'inDropoff', 'outPickup', 'outDropoff', 'board', 'alight'];
     const state = Object.fromEntries(CHOICES.map((k) => [k, null]));
     for (const k of ['from', 'vehicle']) $(k).addEventListener('input', () => { points[k] = null; });
     const resetChoices = () => { for (const k of CHOICES) state[k] = null; };
@@ -322,20 +322,23 @@
     }
 
     // 把輸入框的文字查成座標；「目前位置」不是地址，重新整理後座標會遺失，要重新定位
-    async function lookup(text, emptyMsg) {
+    // near：優先找這附近的地點（同名的「大遠百」全台有好幾家）
+    async function lookup(text, emptyMsg, near) {
       const q = text.trim();
       if (q === '目前位置') return currentPosition();
       if (!q) throw new Error(emptyMsg);
-      const results = await api('/api/geocode?q=' + encodeURIComponent(q));
+      const results = await api('/api/geocode?' + new URLSearchParams({ q, ...(near && { near: `${near.lat},${near.lng}` }) }));
       if (!results.length) throw new Error(`找不到「${q}」，請換個說法或直接點地圖`);
       return results[0];
     }
-    async function resolve(key) {
-      return points[key] || (points[key] = await lookup($(key).value, { from: '請輸入出發點', vehicle: '請輸入取車位置' }[key]));
+    async function resolve(key, near) {
+      return points[key] || (points[key] = await lookup($(key).value, { from: '請輸入出發點', vehicle: '請輸入取車位置' }[key], near));
     }
-    async function resolveStop(s) {
-      return s.point || (s.point = await lookup(s.el.value, '請輸入要去的地方'));
+    async function resolveStop(s, near) {
+      return s.point || (s.point = await lookup(s.el.value, '請輸入要去的地方', near));
     }
+    // 地點名稱加上行政區，查錯地方時一眼看得出來，例如「大遠百（板橋區）」
+    const placeName = (p) => esc(p.name) + (p.area && !p.name.includes(p.area) ? `<span class="muted">（${esc(p.area)}）</span>` : '');
 
     // ---------- 多個地點：排出最順路的順序 ----------
     // 地點不多（最多 8 個），直接試所有順序，用直線距離比較；可選擇最後回到出發點
@@ -375,9 +378,9 @@
       if (mode === 'uber') return api('/api/drive?' + params);
       if (mode === 'bus') return api('/api/bus?' + params);
       if (['tra', 'thsr', 'metro'].includes(mode)) {
-        // 到車站／出站後只用有開啟的工具（步行一定可以）
-        params.set('allow', [tools.has('bike') && 'youbike', tools.has('bus') && 'bus', tools.has('uber') && 'uber'].filter(Boolean).join(','));
-        set(['inPickup', 'inDropoff', 'outPickup', 'outDropoff', 'board', 'alight']);
+        // 到車站／出站後只用有開啟的工具；沒開步行時只有很近才走路。access／egress 是使用者在這段指定的方式
+        params.set('allow', [tools.has('walk') && 'walk', tools.has('bike') && 'youbike', tools.has('bus') && 'bus', tools.has('uber') && 'uber'].filter(Boolean).join(','));
+        set(['access', 'egress', 'inPickup', 'inDropoff', 'outPickup', 'outDropoff', 'board', 'alight']);
       }
       if (mode === 'metro') return api('/api/metro?' + params);
       if (mode === 'tra' || mode === 'thsr') {
@@ -435,7 +438,7 @@
         const filled = stops.filter((s) => s.el.value.trim() || s.point);
         if (!filled.length) throw new Error('請輸入要去的地方');
         const places = [];
-        for (const s of filled) places.push(await resolveStop(s)); // 依序查，地址查詢服務限每秒 1 次
+        for (const s of filled) places.push(await resolveStop(s, from)); // 依序查，地址查詢服務限每秒 1 次
         const back = filled.length > 1 && $('roundTrip').checked;
         const order = filled.length > 1 && $('optimize').checked ? bestOrder(from, places, back) : places;
         const seq = [from, ...order, ...(back ? [from] : [])];
@@ -471,12 +474,12 @@
     function renderTrip() {
       const legs = trip.legs;
       const total = legs.reduce((n, l) => n + (l.results[l.mode]?.duration || 0), 0);
-      const name = (p, i) => (i === 0 ? '出發點' : esc(p.name));
+      const name = (p, i) => (i === 0 ? '出發點' : placeName(p));
       $('trip').innerHTML = `<div class="card">
         <h2>${legs.length > 1 ? `行程 ${legs.length} 段・` : ''}全程約 ${min(total)}</h2>
         ${legs.map((l, i) => `
           <div class="leg ${i === trip.sel ? 'sel' : ''}" data-leg="${i}">
-            <div class="legname"><b>${legs.length > 1 ? `${i + 1}. ` : ''}${name(l.from, i)} → ${esc(l.to.name)}</b>
+            <div class="legname"><b>${legs.length > 1 ? `${i + 1}. ` : ''}${name(l.from, i)} → ${placeName(l.to)}</b>
               <span class="muted">・${TOOLS[l.mode]}${l.results[l.mode]?.duration != null ? ` 約 ${min(l.results[l.mode].duration)}` : ''}</span></div>
             <div class="modes">${Object.entries(l.results).map(([m, x]) => `
               <button type="button" data-leg="${i}" data-mode="${m}" class="${m === l.mode ? 'on' : ''}" ${x.duration == null ? 'disabled' : ''}
@@ -1060,7 +1063,14 @@
     function accessCard(a, label, inbound) {
       const side = inbound ? 'in' : 'out';
       const fallback = a.fallback ? `<div class="card demo">${esc(label)}：附近沒有合適的${ACCESS[a.fallback]}，改用${ACCESS[a.kind]}</div>` : '';
-      if (a.kind === 'walk') return fallback;
+      // 這段接駁可以換成步行或其他有開啟的工具（例如不想走到捷運站，改叫 Uber）
+      const kinds = ['walk', tools.has('bike') && 'youbike', tools.has('bus') && 'bus', tools.has('uber') && 'uber'].filter(Boolean);
+      const nowKind = a.kind === 'taxi' ? 'uber' : a.kind;
+      const switcher = kinds.length > 1 ? `<div class="modes">換成：${kinds.map((k) => `<button type="button" data-type="${inbound ? 'access' : 'egress'}"
+        data-id="${k}" class="${k === nowKind ? 'on' : ''}">${ACCESS[k]}</button>`).join('')}</div>` : '';
+      if (a.kind === 'walk') {
+        return `${fallback}<div class="card"><h2>${esc(label)}：🚶 步行（約 ${min(a.duration)}・${km(a.distance)}）</h2>${switcher}</div>`;
+      }
       const others = (a.alternatives || []).filter((x) => x.kind !== a.kind)
         .map((x) => `${ACCESS[x.kind]} 約 ${min(x.duration)}`).join('・');
       const bikeList = (list, sel, type) => list.map((s) => `
@@ -1070,6 +1080,7 @@
         </div>`).join('');
       const from = inbound ? '出發點' : '車站', to = inbound ? '車站' : '目的地';
       return `${fallback}<div class="card"><h2>${esc(label)}：${a.alternatives ? '建議' : ''}${ACCESS[a.kind]}（約 ${min(a.duration)}・${km(a.distance)}）</h2>
+        ${switcher}
         <div class="muted">${a.alternatives ? `距離太遠不適合步行。${others ? `其他方式：${others}` : ''}` : '你選的接駁方式。'}
         ${a.kind === 'bus' && !inbound ? '<br>下車後的公車等車時間為估計值，出站時請再確認到站時間。' : ''}
         ${a.kind === 'youbike' ? `<br>借車站「${esc(a.pickup.name)}」可借 ${a.pickup.bikes} 台，還車站「${esc(a.dropoff.name)}」可還 ${a.dropoff.docks} 位（現在的數字）。` : ''}</div>
@@ -1393,8 +1404,11 @@
       if (opt?.dataset.train) return showTrain(Number(opt.dataset.train));
       if (opt?.dataset.metro) return showMetro(Number(opt.dataset.metro));
       if (opt) return showBusOption(Number(opt.dataset.opt));
-      const el = e.target.closest('.alt[data-type]'); // 借還車站、停車場、上下車站清單
+      const el = e.target.closest('[data-type][data-id]'); // 借還車站、停車場、上下車站清單、接駁方式
       if (!el || !trip) return;
+      // 換接駁方式時，原本選的借還車站不適用了
+      if (el.dataset.type === 'access') state.inPickup = state.inDropoff = null;
+      if (el.dataset.type === 'egress') state.outPickup = state.outDropoff = null;
       state[el.dataset.type] = el.dataset.id;
       replanLeg();
     });
