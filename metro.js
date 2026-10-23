@@ -37,6 +37,17 @@ function load() {
 const COLORS = { 'KRTC:O': '#f59e0b', 'KRTC:R': '#e11d48', 'KLRT:C': '#22c55e', 'TRTCMG:MK': '#65a30d', 'TMRT:G': '#9cbe3c' };
 const colorOf = (s) => s.color || COLORS[`${s.op}:${s.line}`] || '#0284c7';
 
+// 一條線的班距範圍（分鐘），例：尖峰 4 分、離峰 10 分 → [4, 10]；沒有資料時是預設估計值
+function headwayRange(op, line) {
+  const all = load().services.filter((s) => s.op === op && s.line === line && !s.express)
+    .flatMap((s) => [...s.weekday.headways, ...s.holiday.headways].map((h) => h[2]));
+  if (!all.length) {
+    const s = load().services.find((x) => x.op === op && x.line === line);
+    return { min: s.defaultHeadway, max: s.defaultHeadway, estimated: true };
+  }
+  return { min: Math.round(Math.min(...all)), max: Math.round(Math.max(...all)) };
+}
+
 // 地圖上畫全台捷運：每條線的路徑，以及每個車站有哪些線（同名相鄰的站合併）
 export function metroMap() {
   const { services, stations, operators } = load();
@@ -48,11 +59,18 @@ export function metroMap() {
   }
   const merged = [];
   for (const st of load().list) {
-    const lineNames = [...new Map(services.filter((s) => s.stations.includes(st.key) && !s.express)
-      .map((s) => [s.name, { name: s.name, color: colorOf(s) }])).values()];
+    const here = services.filter((s) => s.stations.includes(st.key) && !s.express);
+    const lineNames = [...new Map(here.map((s) => [s.name, { name: s.name, color: colorOf(s), headway: headwayRange(s.op, s.line) }])).values()];
+    // 首末班車：每個方向一筆
+    const times = (net.firstLast[st.key] || []).map(([dir, first, last, line]) => {
+      const s = here.find((x) => x.line === line) || here[0];
+      return { dir, first, last, line: s?.name, color: s ? colorOf(s) : null };
+    });
     const m = merged.find((x) => x.name === st.name && distance(x, st) < 500);
-    if (m) m.lines.push(...lineNames.filter((l) => !m.lines.some((x) => x.name === l.name)));
-    else merged.push({ name: st.name, lat: st.lat, lng: st.lng, operator: operators[st.op], lines: [...new Map(lineNames.map((l) => [l.name, l])).values()] });
+    if (m) {
+      m.lines.push(...lineNames.filter((l) => !m.lines.some((x) => x.name === l.name)));
+      m.times.push(...times);
+    } else merged.push({ name: st.name, lat: st.lat, lng: st.lng, operator: operators[st.op], lines: lineNames, times });
   }
   return { lines: [...lines.values()], stations: merged };
 }

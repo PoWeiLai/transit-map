@@ -33,7 +33,7 @@ for (const [op, cfg] of Object.entries(OPERATORS)) {
       if (!f) return { hours: (cfg.hours || ['06:00', '24:00']).map(toMin), headways: [] };
       return {
         hours: [toMin(f.OperationTime.StartTime), toMin(f.OperationTime.EndTime)],
-        headways: f.Headways.map((h) => [toMin(h.StartTime), toMin(h.EndTime) || 24 * 60, (h.MinHeadwayMins + h.MaxHeadwayMins) / 2]),
+        headways: f.Headways.map((h) => [toMin(h.StartTime), toMin(h.EndTime) || 24 * 60, (h.MinHeadwayMins + h.MaxHeadwayMins) / 2]).filter((h) => h[2] > 0), // 少數資料班距是 0
       };
     };
     return { weekday: pick(false), holiday: pick(true) };
@@ -134,6 +134,25 @@ for (let i = 0; i < keys.length; i++) {
   }
 }
 
+// 各站各方向的首末班車：站 key → [[方向, 首班, 末班, 線別]]；平日假日不同時取最早首班、最晚末班
+const lateness = (t) => { const m = toMin(t); return m < 4 * 60 ? m + 24 * 60 : m; }; // 末班過午夜算當天
+const firstLast = {};
+for (const op of Object.keys(OPERATORS)) {
+  for (const e of raw(op, 'FirstLastTimetable')) {
+    const key = `${op}:${e.StationID}`;
+    const dest = e.DestinationStationName?.Zh_tw?.replace(/(?<!車)站$/, '');
+    const dir = (e.TripHeadSign || (dest ? `往${dest}` : '')).replace(/(?<!車)站$/, '');
+    if (!dir || !e.FirstTrainTime || dest === stations[key]?.name) continue; // 終點站自己往自己的不列
+    const list = (firstLast[key] ||= []);
+    const same = list.find((x) => x[0] === dir && x[3] === e.LineID);
+    if (!same) list.push([dir, e.FirstTrainTime, e.LastTrainTime, e.LineID]);
+    else {
+      if (lateness(e.FirstTrainTime) < lateness(same[1])) same[1] = e.FirstTrainTime;
+      if (lateness(e.LastTrainTime) > lateness(same[2])) same[2] = e.LastTrainTime;
+    }
+  }
+}
+
 // 站點座標只保留有路線經過的
 const used = new Set(services.flatMap((s) => s.stations));
 const out = {
@@ -143,6 +162,7 @@ const out = {
   services,
   transfers: transfers.filter(([a, b]) => used.has(a) && used.has(b)),
   fares,
+  firstLast,
 };
 writeFileSync(new URL('../data/metro.json', import.meta.url), JSON.stringify(out));
 console.log(`${Object.keys(out.stations).length} 站、${services.length} 條路線、${out.transfers.length} 個轉乘`);

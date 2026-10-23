@@ -204,6 +204,9 @@
     const metroLines = L.layerGroup().addTo(map);
     const metroStops = L.layerGroup();
     const METRO_STOP_ZOOM = 12;
+    const headwayText = (h) => (!h ? '' : h.min === h.max
+      ? `${h.estimated ? '約 ' : ''}每 ${h.min} 分一班` : `每 ${h.min}～${h.max} 分一班（尖峰較密）`);
+    const lastTime = (t) => { const [h, m] = t.split(':').map(Number); return h >= 24 || h < 4 ? `${String(h % 24).padStart(2, '0')}:${String(m).padStart(2, '0')}（隔天）` : t; };
     map.createPane('metro').style.zIndex = 350; // 在底圖之上、規劃路線之下
     fetch('/api/metro/map').then((r) => r.json()).then(({ lines, stations }) => {
       for (const l of lines) {
@@ -212,7 +215,12 @@
       for (const s of stations) {
         const name = s.name.endsWith('站') ? s.name : `${s.name}站`;
         const box = () => placeBox({ lat: s.lat, lng: s.lng, name }, `<b>🚇 ${esc(name)}</b> <span class="muted">${esc(s.operator)}</span>
-          <div class="chips">${s.lines.map((l) => `<span class="chip" style="background:${esc(l.color)}">${esc(l.name)}</span>`).join('')}</div>`);
+          ${s.lines.map((l) => `<div class="chips"><span class="chip" style="background:${esc(l.color)}">${esc(l.name)}</span>
+            <span class="muted">${headwayText(l.headway)}</span></div>`).join('')}
+          ${s.times.length ? `<table class="fares">
+            <tr><th>方向</th><th>首班</th><th>末班</th></tr>
+            ${s.times.map((t) => `<tr><td><span style="color:${esc(t.color || 'inherit')}">●</span> ${esc(t.dir)}</td><td>${esc(t.first)}</td><td>${esc(lastTime(t.last))}</td></tr>`).join('')}
+          </table>` : '<p class="hint">沒有首末班車資料</p>'}`);
         L.circleMarker([s.lat, s.lng], { pane: 'metro', radius: 5, color: s.lines[0]?.color || '#0284c7', weight: 2, fillColor: '#fff', fillOpacity: 1 })
           .bindPopup(box).addTo(metroStops);
       }
