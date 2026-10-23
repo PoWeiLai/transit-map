@@ -26,7 +26,8 @@ const ROUTE_URL = {
 const VALHALLA_COSTING = { foot: 'pedestrian', bike: 'bicycle', scooter: 'motor_scooter' };
 // 捷運出發時，在出發點多遠內找出口
 const EXIT_RADIUS_M = 400;
-const USER_AGENT = 'ubike-planner/1.0 (local dev)';
+// 公開服務要求標明是哪個程式在呼叫
+const USER_AGENT = 'transit-map/1.0 (+https://github.com/PoWeiLai/transit-map)';
 const STATION_CACHE_MS = 60 * 1000;
 // 路線服務失敗時用直線距離估算
 const FALLBACK_SPEED = { foot: 4.5 / 3.6, bike: 12 / 3.6, scooter: 25 / 3.6, taxi: 30 / 3.6 }; // m/s
@@ -115,24 +116,83 @@ function parsePoint(str) {
 const geocodeCache = new Map();
 let geocodeQueue = Promise.resolve();
 
+// Nominatim 拒絕時（雲端主機的共用 IP 常被限流，回 429）改用 Photon（同樣是 OpenStreetMap 資料），
+// 並暫停呼叫 Nominatim 一段時間
+const PHOTON_URL = 'https://photon.komoot.io/api/';
+const TAIWAN_BBOX = '119.3,21.8,122.1,25.4'; // 經度、緯度範圍
+const NOMINATIM_COOLDOWN_MS = 10 * 60 * 1000;
+let nominatimDownUntil = 0;
+
+async function nominatim(q) {
+  const url = `${NOMINATIM_URL}?${new URLSearchParams({
+    q,
+    format: 'jsonv2',
+    countrycodes: 'tw',
+    limit: '5',
+    'accept-language': 'zh-TW',
+  })}`;
+  const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(10000) });
+  if (!res.ok) throw new Error(`Nominatim ${res.status}`);
+  return (await res.json()).map((r) => ({
+    name: r.name || r.display_name.split(',')[0],
+    label: r.display_name,
+    lat: Number(r.lat),
+    lng: Number(r.lon),
+  }));
+}
+
+// Photon 查不到「台北市信義區信義路五段7號」這種縣市區寫在前面的地址，
+// 要改成「信義路五段7號, 信義區, 台北市」；查到的結果優先選縣市、區、門牌都對得上的，
+// 門牌查不到就查那條路
+const AREA = /^([臺台]?[^\d\s,]{1,2}[市縣])?([^\d\s,]{1,3}?[區鄉鎮])?(.+)$/;
+const sameText = (a, b) => Boolean(a && b) && a.replace(/臺/g, '台') === b.replace(/臺/g, '台');
+
+async function photon(q) {
+  const [, city, district, rest] = q.replace(/\s+/g, '').match(AREA) || [];
+  if (!city && !district) return photonOnce(q);
+  const area = [district, city].filter(Boolean).join(', ');
+  const number = rest.match(/(\d+)號/)?.[1];
+  const road = rest.replace(/\d+號.*$/, '');
+  for (const query of [`${rest}, ${area}`, road !== rest && `${road}, ${area}`].filter(Boolean)) {
+    // 地址要在同一條路上（地標名稱本身就是那條路也算），門牌相同的排前面
+    const onRoad = (r) => !road || [r.street, r.name].some((x) => x && x.replace(/臺/g, '台').startsWith(road.replace(/臺/g, '台')));
+    const found = (await photonOnce(query))
+      .filter((r) => (!city || sameText(r.city, city)) && (!district || sameText(r.district, district)) && onRoad(r))
+      .sort((x, y) => (y.housenumber === number) - (x.housenumber === number));
+    if (found.length) return found;
+  }
+  return [];
+}
+
+async function photonOnce(q) {
+  const url = `${PHOTON_URL}?${new URLSearchParams({ q, limit: '5', bbox: TAIWAN_BBOX })}`;
+  const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(10000) });
+  if (!res.ok) throw new Error(`地址查詢失敗 ${res.status}`);
+  return (await res.json()).features.map(({ properties: p, geometry }) => {
+    const street = [p.street, p.housenumber && `${p.housenumber}號`].filter(Boolean).join('');
+    return {
+      name: p.name || street || p.district || p.city,
+      label: [p.city, p.district, street, p.name].filter(Boolean).join(' '),
+      lat: geometry.coordinates[1],
+      lng: geometry.coordinates[0],
+      city: p.city, district: p.district, street: p.street, housenumber: p.housenumber,
+    };
+  });
+}
+
 function geocode(q) {
   if (geocodeCache.has(q)) return Promise.resolve(geocodeCache.get(q));
   const job = geocodeQueue.then(async () => {
-    const url = `${NOMINATIM_URL}?${new URLSearchParams({
-      q,
-      format: 'jsonv2',
-      countrycodes: 'tw',
-      limit: '5',
-      'accept-language': 'zh-TW',
-    })}`;
-    const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT } });
-    if (!res.ok) throw new Error(`地址查詢失敗 ${res.status}`);
-    const results = (await res.json()).map((r) => ({
-      name: r.name || r.display_name.split(',')[0],
-      label: r.display_name,
-      lat: Number(r.lat),
-      lng: Number(r.lon),
-    }));
+    let results = null;
+    if (Date.now() >= nominatimDownUntil) {
+      try {
+        results = await nominatim(q);
+      } catch {
+        nominatimDownUntil = Date.now() + NOMINATIM_COOLDOWN_MS;
+      }
+    }
+    // Nominatim 不能用、或查不到時，再問 Photon
+    if (!results?.length) results = await photon(q);
     geocodeCache.set(q, results);
     return results;
   });
