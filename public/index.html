@@ -114,6 +114,7 @@
         <button type="button" data-mode="scooter">🛵 共享機車</button>
         <button type="button" data-mode="tra">🚆 台鐵</button>
         <button type="button" data-mode="thsr">🚄 高鐵</button>
+        <button type="button" data-mode="metro">🚇 捷運</button>
       </div>
       <div>
         <label for="from">出發點</label>
@@ -176,20 +177,52 @@
       html: `<div class="pin" style="background:${color};width:24px;height:24px;line-height:20px">${text}</div>`,
     });
 
+    // 車站的彈出視窗：設為出發點／目的地，以及叫 Uber。每次打開才產生，
+    // 已經設好出發點時，Uber 直接帶入「出發點 → 這站」，不用在 Uber 裡重打
+    function placeBox(place, head) {
+      const box = document.createElement('div');
+      const fromHere = points.from && dist(points.from, place) > 50;
+      box.innerHTML = `${head}<button data-k="from">設為出發點</button> <button data-k="to">設為目的地</button>
+        <br>${fromHere ? uberA(points.from, place, `🚗 Uber：${esc(points.from.name)} → 這裡`) : uberA(null, place, '🚗 Uber 從目前位置叫車到這裡')}`;
+      box.addEventListener('click', (ev) => {
+        if (ev.target.dataset.k) setPoint(ev.target.dataset.k, place, place.name);
+      });
+      return box;
+    }
+
     // 高鐵站一直標在地圖上（不隨規劃結果清除），點一下可設為出發點或目的地
     const stationLayer = L.layerGroup().addTo(map);
     fetch('/api/rail/stations?system=thsr').then((r) => (r.ok ? r.json() : [])).then((list) => {
       for (const s of list) {
         const name = `${s.name}站`;
-        const box = document.createElement('div');
-        box.innerHTML = `<b>🚄 ${esc(name)}</b><br><button data-k="from">設為出發點</button> <button data-k="to">設為目的地</button>
-          <br>${uberA(null, { lat: s.lat, lng: s.lng, name }, '🚗 Uber 叫車到這站')}`;
-        box.addEventListener('click', (ev) => {
-          if (ev.target.dataset.k) setPoint(ev.target.dataset.k, { lat: s.lat, lng: s.lng, name }, name);
-        });
+        const box = () => placeBox({ lat: s.lat, lng: s.lng, name }, `<b>🚄 ${esc(name)}</b><br>`);
         L.marker([s.lat, s.lng], { icon: pin('#ea580c', '高'), zIndexOffset: -100 }).bindPopup(box).addTo(stationLayer);
       }
     }).catch(() => {}); // 沒有 TDX 金鑰時就不標示
+
+    // 全台捷運／輕軌：路線一直畫在地圖上，車站放大到一定程度才顯示（全台約 280 站，縮小時太擠）
+    const metroLines = L.layerGroup().addTo(map);
+    const metroStops = L.layerGroup();
+    const METRO_STOP_ZOOM = 12;
+    map.createPane('metro').style.zIndex = 350; // 在底圖之上、規劃路線之下
+    fetch('/api/metro/map').then((r) => r.json()).then(({ lines, stations }) => {
+      for (const l of lines) {
+        L.polyline(l.path, { pane: 'metro', color: l.color, weight: 3, opacity: 0.55, interactive: false }).addTo(metroLines);
+      }
+      for (const s of stations) {
+        const name = s.name.endsWith('站') ? s.name : `${s.name}站`;
+        const box = () => placeBox({ lat: s.lat, lng: s.lng, name }, `<b>🚇 ${esc(name)}</b> <span class="muted">${esc(s.operator)}</span>
+          <div class="chips">${s.lines.map((l) => `<span class="chip" style="background:${esc(l.color)}">${esc(l.name)}</span>`).join('')}</div>`);
+        L.circleMarker([s.lat, s.lng], { pane: 'metro', radius: 5, color: s.lines[0]?.color || '#0284c7', weight: 2, fillColor: '#fff', fillOpacity: 1 })
+          .bindPopup(box).addTo(metroStops);
+      }
+    }).catch(() => {});
+    const toggleStops = () => {
+      if (map.getZoom() >= METRO_STOP_ZOOM) metroStops.addTo(map);
+      else metroStops.remove();
+    };
+    map.on('zoomend', toggleStops);
+    toggleStops();
 
     // 小螢幕時結果在地圖下方，要捲過去才看得到
     function show(html) {
@@ -247,6 +280,7 @@
     async function planMode(from, to) {
       const params = new URLSearchParams({ from: `${from.lat},${from.lng}`, to: `${to.lat},${to.lng}` });
       if (state.mode === 'bus') return renderBus(await api('/api/bus?' + params), from, to);
+      if (state.mode === 'metro') return renderMetro(await api('/api/metro?' + params), from, to);
       if (state.mode === 'tra' || state.mode === 'thsr') {
         if ($('date').value) params.set('date', $('date').value);
         if ($('time').value) params.set('time', $('time').value);
@@ -310,18 +344,20 @@
         q.set('pickup[latitude]', from.lat);
         q.set('pickup[longitude]', from.lng);
         if (from.name) q.set('pickup[nickname]', from.name);
+        if (from.name) q.set('pickup[formatted_address]', from.name);
       } else {
         q.set('pickup', 'my_location');
       }
       q.set('dropoff[latitude]', to.lat);
       q.set('dropoff[longitude]', to.lng);
       if (to.name) q.set('dropoff[nickname]', to.name);
+      if (to.name) q.set('dropoff[formatted_address]', to.name);
       return 'https://m.uber.com/ul/?' + q;
     }
     const uberA = (from, to, text) => `<a class="uber" target="_blank" rel="noopener" href="${esc(uberLink(from, to))}">${text}</a>`;
 
-    const GMODE = { foot: 'walking', bike: 'bicycling', bus: 'transit', train: 'transit', scooter: 'driving', taxi: 'driving' };
-    const TRANSIT = new Set(['bus', 'train']); // 坐車的段：步驟是沿途各站
+    const GMODE = { foot: 'walking', bike: 'bicycling', bus: 'transit', train: 'transit', metro: 'transit', scooter: 'driving', taxi: 'driving' };
+    const TRANSIT = new Set(['bus', 'train', 'metro']); // 坐車的段：步驟是沿途各站
     function gmaps(from, to, mode) {
       return 'https://www.google.com/maps/dir/?api=1&' + new URLSearchParams({
         origin: `${from.lat},${from.lng}`, destination: `${to.lat},${to.lng}`, travelmode: GMODE[mode],
@@ -411,15 +447,17 @@
       bus: { color: '#16a34a', weight: 6 },
       scooter: { color: '#7c3aed', weight: 6 },
       train: { color: '#0f766e', weight: 6 },
+      metro: { color: '#0284c7', weight: 6 },
       taxi: { color: '#ca8a04', weight: 5 },
     };
 
     function drawLegs(legs, from, to) {
       for (const leg of legs) {
-        L.polyline(leg.path, LEG_STYLE[leg.mode]).addTo(layer);
+        const style = leg.color ? { ...LEG_STYLE[leg.mode], color: leg.color } : LEG_STYLE[leg.mode]; // 捷運用路線顏色
+        L.polyline(leg.path, style).addTo(layer);
         if (TRANSIT.has(leg.mode)) {
           for (const s of leg.steps) {
-            L.circleMarker([s.lat, s.lng], { radius: s.type === 'stop' ? 3 : 6, color: LEG_STYLE[leg.mode].color, fillColor: '#fff', fillOpacity: 1, weight: 2 })
+            L.circleMarker([s.lat, s.lng], { radius: s.type === 'stop' ? 3 : 6, color: style.color, fillColor: '#fff', fillOpacity: 1, weight: 2 })
               .bindPopup(`${esc(s.name)}${s.address ? '<br>' + esc(s.address) : ''}`).addTo(layer);
           }
         }
@@ -605,9 +643,83 @@
       `);
     }
 
+    // ---------- 捷運／輕軌 ----------
+    let metroResult = null;
+    const lineChip = (l) => `<span class="chip" style="background:${esc(l.color || '#0284c7')}">${esc(l.route)}</span>`;
+
+    function renderMetro(r, from, to) {
+      metroResult = { r, from, to };
+      showMetro(0);
+    }
+
+    function showMetro(idx) {
+      const { r, from, to } = metroResult;
+      const o = r.options[idx];
+      stopNav();
+      layer.clearLayers();
+
+      const n = o.rides.length;
+      const stages = [
+        ...accessStages(o.walkIn, o.rides[0].board, `${o.rides[0].board.name}站`,
+          `已到達${o.rides[0].board.name}站，請搭${o.rides[0].route}（${o.rides[0].headsign}）`, true),
+        ...o.rides.map((l, i) => ({
+          leg: l, from: l.board, to: l.alight, icon: '🚇',
+          title: `${l.route}（${l.headsign}）到${l.alight.name}`,
+          arrive: i < n - 1
+            ? `請在${l.alight.name}站下車，轉乘${o.rides[i + 1].route}（${o.rides[i + 1].headsign}）`
+            : `到站了！請在${l.alight.name}站下車`,
+        })),
+        ...accessStages(o.walkOut, to, `目的地：${to.name}`, '🎉 已抵達目的地', false),
+      ];
+      current = { stages, from, to };
+      drawLegs(stages.map((s) => s.leg), from, to);
+      map.fitBounds(L.featureGroup(layer.getLayers()).getBounds(), { padding: [30, 30] });
+
+      const wait = (l) => `約等 ${min(l.wait * 1)}（約 ${Math.round(l.headway)} 分一班）`;
+      const detail = (st) => {
+        const l = st.leg;
+        if (l.mode === 'metro') {
+          const tr = l.transfer
+            ? l.transfer.sameLine ? `在${esc(l.board.name)}站換車（同一條線的支線）<br>`
+            : `在${esc(l.board.name)}站轉乘${l.transfer.walk > 120 ? `（步行約 ${min(l.transfer.walk)}）` : ''}<br>` : '';
+          return `${tr}搭 ${lineChip(l)} ${esc(l.headsign)} <span class="muted">${esc(l.operator)}</span><br>
+            ${esc(l.board.name)} → ${esc(l.alight.name)}・<span class="muted">${wait(l)}</span><br>`;
+        }
+        if (l.mode === 'bus') {
+          return `搭 <span class="chip">${esc(l.route)}</span> ${esc(l.headsign)}<br>
+            「${esc(l.board.name)}」上車 → 「${esc(l.alight.name)}」下車<br>${st.inbound ? etaHtml(l) + '<br>' : ''}`;
+        }
+        return `${esc(st.title)}<br>`;
+      };
+      const fare = (x) => (x.fare.total != null ? `・${x.fare.split ? '約 ' : ''}${price(x.fare.total)}` : '');
+      const est = stages.some((s) => s.leg.estimated) ? '<p class="hint">※ 部分路線服務無回應，為直線距離估算</p>' : '';
+
+      show(`
+        ${o.closed ? `<div class="card err">⚠️ 現在可能不在營運時間（${hhmm(o.closed.open)}～${hhmm(o.closed.close)}），請改用其他交通方式</div>` : ''}
+        ${r.options.map((x, i) => `
+          <div class="card opt ${i === idx ? 'sel' : ''}" data-metro="${i}">
+            <div class="chips">${x.rides.map(lineChip).join(' › ')}</div>
+            <div><b>約 ${min(x.duration)}</b>
+              <span class="muted">・${x.transfers ? `轉乘 ${x.transfers} 次` : '直達'}${fare(x)}・抵達約 ${hhmm(x.reach)}</span></div>
+            <div class="muted">${esc(x.rides[0].board.name)} → ${esc(x.rides.at(-1).alight.name)}</div>
+          </div>`).join('')}
+        ${accessCard(o.walkIn, `到${o.rides[0].board.name}站`, true)}
+        <div class="card">
+          <h2>路線說明</h2>
+          ${stages.map((st, i) => stageHtml(st, i, detail(st))).join('')}
+          ${est}
+          ${navButtons}
+        </div>
+        ${accessCard(o.walkOut, `從${o.rides.at(-1).alight.name}站到目的地`, false)}
+        ${o.fare.total != null ? `<div class="card"><h2>💰 票價約 ${price(o.fare.total)}</h2>
+          <p class="hint">單程票全票。${o.fare.split ? '跨不同系統時為各段票價相加，用電子票證可能有轉乘優惠。' : '用悠遊卡／一卡通等電子票證可能另有優惠。'}</p></div>` : ''}
+        <p class="hint">時間依官方站間行駛時間與班距估算（等車抓半個班距），實際依現場為準。資料來自交通部 TDX。</p>
+      `);
+    }
+
     // ---------- 火車站接駁（步行／公車／YouBike／計程車） ----------
     const ACCESS = { walk: '🚶 步行', bus: '🚌 公車', youbike: '🚲 YouBike', taxi: '🚕 計程車' };
-    const LEG_ICON = { foot: '🚶', bus: '🚌', bike: '🚲', taxi: '🚕' };
+    const LEG_ICON = { foot: '🚶', bus: '🚌', bike: '🚲', taxi: '🚕', metro: '🚇' };
     const endOf = (leg, last) => { const [lat, lng] = last ? leg.path.at(-1) : leg.path[0]; return { lat, lng }; };
 
     // 接駁拆成導航的每一段；最後一段的終點是 finalTo，到達時提示 finalArrive
@@ -960,6 +1072,7 @@
       }
       const opt = e.target.closest('.opt');
       if (opt?.dataset.train) return showTrain(Number(opt.dataset.train));
+      if (opt?.dataset.metro) return showMetro(Number(opt.dataset.metro));
       if (opt) return showBusOption(Number(opt.dataset.opt));
       const el = e.target.closest('.alt[data-type]'); // 只有借/還車站清單可以點
       if (!el) return;
@@ -1026,8 +1139,10 @@
       const box = document.createElement('div');
       box.innerHTML = '<button data-k="from">設為出發點</button> <button data-k="to">設為目的地</button>' +
         (state.mode === 'scooter' ? ' <button data-k="vehicle">設為取車位置</button>' : '') +
-        `<br>${uberA(null, { lat, lng, name: '地圖選點' }, '🚗 Uber 叫車到這裡')}` +
-        (points.from ? ` ${uberA(points.from, { lat, lng, name: '地圖選點' }, '🚗 從出發點叫 Uber 到這裡')}` : '');
+        // 已設出發點：Uber 直接帶入「出發點 → 這裡」
+        `<br>${points.from
+          ? uberA(points.from, { lat, lng, name: '地圖選點' }, `🚗 Uber：${esc(points.from.name)} → 這裡`)
+          : uberA(null, { lat, lng, name: '地圖選點' }, '🚗 Uber 從目前位置叫車到這裡')}`;
       box.addEventListener('click', (ev) => {
         const k = ev.target.dataset.k;
         if (!k) return;

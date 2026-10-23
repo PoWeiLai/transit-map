@@ -5,6 +5,7 @@ import { planBus, nearbyArrivals, warmUp } from './bus.js';
 import { nearbyParking, warmUp as warmUpParking } from './scooter.js';
 import { planRail, railStations, warmUp as warmUpRail } from './rail.js';
 import { hasTdx, taipeiNow } from './tdx.js';
+import { planMetro, metroMap } from './metro.js';
 
 // TDX 金鑰等設定放在 .env（不進版控）
 try { process.loadEnvFile(); } catch { /* 沒有 .env 也能跑 */ }
@@ -477,6 +478,16 @@ app.get('/api/rail', wrap(async (req, res) => {
   if (when.error) return res.status(400).json({ error: when.error });
   res.json(await planRail(req.query.system === 'thsr' ? 'thsr' : 'tra', from, to, connectRail, when));
 }));
+
+// 全台捷運／輕軌：接駁到車站 → 搭捷運（可轉乘） → 接駁到目的地
+app.get('/api/metro', wrap(async (req, res) => {
+  const from = parsePoint(req.query.from);
+  const to = parsePoint(req.query.to);
+  if (!from || !to) return res.status(400).json({ error: '請提供出發點與目的地' });
+  res.json(await planMetro(from, to, connectRail));
+}));
+
+app.get('/api/metro/map', (req, res) => res.json(metroMap()));
 
 // 乘車日期（YYYY-MM-DD）與出發時間（HH:MM）；沒填日期就是現在，其他日期沒填時間就從頭班車列起
 const MAX_DAYS_AHEAD = 30;
