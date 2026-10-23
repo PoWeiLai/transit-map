@@ -577,7 +577,7 @@
         const { summary: m } = await api('/api/youbike?bbox=' + [leg.from.lat - dLat, leg.from.lng - dLng, leg.from.lat + dLat, leg.from.lng + dLng].join(','));
         if (!m.stations || m.withBikes > 0 || trip.legs[trip.sel] !== leg) return;
         $('out').insertAdjacentHTML('afterbegin', `<div class="card demo">🚲 ${leg.index === 0 ? '出發點' : esc(leg.from.name)}附近 1 公里內的
-          ${m.stations} 個 YouBike 站目前都沒有車可借${m.paused ? `（${m.paused === m.stations ? '全部' : m.paused + ' 站'}暫停服務，可能是系統維護）` : ''}，
+          ${m.stations} 個 YouBike 站目前都沒有車可借${m.paused ? `（${m.paused === m.stations ? '全部' : m.paused + ' 站'}暫停服務，可能因颱風等天候因素或系統維護，請留意 YouBike 公告）` : ''}，
           所以沒有安排騎車。地圖右上角可以看哪裡有車。</div>`);
       } catch { /* 查不到就不顯示 */ }
     }

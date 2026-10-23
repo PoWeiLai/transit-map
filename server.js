@@ -571,7 +571,7 @@ app.get('/api/plan', wrap(async (req, res) => {
     const where = pickups.length ? '目的地' : '出發點';
     return res.status(404).json({
       error: !around.length ? `${where}附近 ${PLAN_BIKE_NEAR_M / 1000} 公里內沒有 YouBike 站`
-        : paused ? `${where}附近的 YouBike 目前暫停服務（可能是系統維護），請稍後再試或改用其他交通方式`
+        : paused ? `${where}附近的 YouBike 目前暫停服務（可能因颱風等天候因素或系統維護，請留意 YouBike 公告），請改用其他交通方式`
         : `${where}附近 ${PLAN_BIKE_NEAR_M / 1000} 公里內的 YouBike 目前${pickups.length ? '都沒有空位可還' : '都沒有車可借'}`,
     });
   }
