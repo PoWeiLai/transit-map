@@ -109,10 +109,18 @@
     .fares th:first-child, .fares td:first-child { text-align:left; font-weight:400; color:var(--muted); }
     .pin { border-radius:50%; border:2px solid #fff; box-shadow:0 0 3px rgba(0,0,0,.5);
            color:#fff; font:700 11px/20px system-ui; text-align:center; }
+    #formToggle, .mapsize { display:none; }
+    .mapsize a { font-size:18px; font-weight:700; }
     @media (max-width: 760px) {
       body { grid-template-columns: 1fr; grid-template-rows: auto 45vh; }
       aside { border-right:0; order:1; }
       #map { order:0; height:45vh; }
+      /* 手機畫面小：出發點、目的地可以收起來，地圖可以放大 */
+      #formToggle { display:block; margin:10px 16px 0; color:var(--muted); font-size:14px; }
+      body.form-hidden form { display:none; }
+      body.map-big { grid-template-rows: auto 75vh; }
+      body.map-big #map { height:75vh; }
+      .mapsize { display:block; }
     }
   </style>
 </head>
@@ -127,6 +135,7 @@
       <div class="notice" id="navNotice" hidden></div>
       <button type="button" id="navStop">結束導航</button>
     </div>
+    <button type="button" id="formToggle">▲ 收起出發點、目的地</button>
     <form id="form">
       <div>
         <label>交通工具（點一下開／關，可以多選）</label>
@@ -187,6 +196,30 @@
       maxZoom: 19, attribution: '&copy; OpenStreetMap',
     }).addTo(map);
     const layer = L.layerGroup().addTo(map);
+
+    // ---------- 手機：收合出發點／目的地、放大地圖 ----------
+    const isPhone = () => matchMedia('(max-width: 760px)').matches;
+    function setFormHidden(hidden) {
+      document.body.classList.toggle('form-hidden', hidden);
+      $('formToggle').textContent = hidden ? '▼ 展開出發點、目的地' : '▲ 收起出發點、目的地';
+    }
+    $('formToggle').addEventListener('click', () => setFormHidden(!document.body.classList.contains('form-hidden')));
+    const mapSize = L.control({ position: 'topleft' });
+    mapSize.onAdd = () => {
+      const box = L.DomUtil.create('div', 'leaflet-bar mapsize');
+      box.innerHTML = '<a href="#" role="button" title="放大地圖">⤢</a>';
+      const a = box.firstChild;
+      L.DomEvent.on(a, 'click', (e) => {
+        L.DomEvent.preventDefault(e);
+        const big = document.body.classList.toggle('map-big');
+        a.textContent = big ? '⤡' : '⤢';
+        a.title = big ? '縮小地圖' : '放大地圖';
+        setTimeout(() => map.invalidateSize(), 50); // 地圖大小變了要重新排圖磚
+      });
+      L.DomEvent.disableClickPropagation(box);
+      return box;
+    };
+    mapSize.addTo(map);
 
     // 已確認的座標；使用者改了文字就清掉，重新查詢
     const points = { from: null, vehicle: null };
@@ -513,6 +546,7 @@
         }
         drawStops(seq, back);
         showLeg(0);
+        if (isPhone()) setFormHidden(true); // 規劃好了，手機上把輸入區收起來，留空間給地圖和結果
       } catch (err) {
         show(`<div class="card err">${esc(err.message)}</div>${err.query ? googleFix(err.query) : ''}`);
       }
