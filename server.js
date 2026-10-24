@@ -4,7 +4,7 @@ import { distance } from './geo.js';
 import { planBus, nearbyArrivals, warmUp } from './bus.js';
 import { nearbyParking, warmUp as warmUpParking } from './scooter.js';
 import { planRail, railStations, warmUp as warmUpRail } from './rail.js';
-import { hasTdx, taipeiNow } from './tdx.js';
+import { tdx, hasTdx, taipeiNow } from './tdx.js';
 import { planMetro, metroMap } from './metro.js';
 
 // TDX 金鑰等設定放在 .env（不進版控）
@@ -176,13 +176,14 @@ async function photon(q, near) {
 }
 
 async function photonOnce(q, near) {
-  const params = { q, limit: '5', bbox: TAIWAN_BBOX };
+  // Photon 只認得「臺中市」這種正式寫法，「台中市」會查不到
+  const params = { q: q.replace(/台([北中南東][市縣])/g, '臺$1'), limit: '5', bbox: TAIWAN_BBOX };
   if (near) Object.assign(params, { lat: near.lat, lon: near.lng });
   const url = `${PHOTON_URL}?${new URLSearchParams(params)}`;
   const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(10000) });
   if (!res.ok) throw new Error(`地址查詢失敗 ${res.status}`);
   return (await res.json()).features.map(({ properties: p, geometry }) => {
-    const street = [p.street, p.housenumber && `${p.housenumber}號`].filter(Boolean).join('');
+    const street = [p.street, p.housenumber && p.housenumber.replace(/號?$/, '號')].filter(Boolean).join('');
     return {
       name: p.name || street || p.district || p.city,
       label: [p.city, p.district, street, p.name].filter(Boolean).join(' '),
@@ -195,13 +196,65 @@ async function photonOnce(q, near) {
   });
 }
 
+// ---------- 門牌地址（TDX 地址定位，資料來自內政部門牌） ----------
+// OpenStreetMap 幾乎沒有台灣的門牌號碼，只查得到那條路；有「號」的地址改用 TDX 查門牌位置。
+// TDX 要有縣市＋區才查得準，少寫時先用地圖資料找出那條路在哪個縣市、區（離出發點近的優先）再補上
+
+// 「台中文心南一路195號」：縣市少寫「市／縣」時補上（新竹、嘉義先當市）
+const CITY_SUFFIX = {
+  台北: '市', 新北: '市', 桃園: '市', 台中: '市', 台南: '市', 高雄: '市', 基隆: '市', 新竹: '市', 嘉義: '市',
+  苗栗: '縣', 彰化: '縣', 南投: '縣', 雲林: '縣', 屏東: '縣', 宜蘭: '縣', 花蓮: '縣', 台東: '縣', 澎湖: '縣', 金門: '縣', 連江: '縣',
+};
+const ADDRESS_AREAS = 2; // 少寫縣市、區又不知道出發點時，最多試幾個可能的地區（每個要呼叫一次 TDX，額度很少）
+const plain = (s) => String(s || '').replace(/臺/g, '台').replace(/\s+/g, '');
+
+function parseAddress(text) {
+  let q = plain(text).replace(/^(中華民國|台灣)/, '').replace(/^\d{3,6}/, ''); // 去掉郵遞區號
+  const short = Object.keys(CITY_SUFFIX).find((c) => q.startsWith(c) && !/^[市縣]/.test(q.slice(c.length)));
+  if (short) q = short + CITY_SUFFIX[short] + q.slice(short.length);
+  const m = q.match(/^([^\d]{2}[市縣])?([^\d]{1,3}?[區鄉鎮市])?(\D.*?)(\d+(?:之\d+)?)號/);
+  if (!m) return null;
+  const [, city, district, road, number] = m;
+  return { city, district, road, number };
+}
+
+async function tdxAddress(text, near) {
+  if (!hasTdx()) return [];
+  const a = parseAddress(text);
+  if (!a) return [];
+  let areas = [[a.city, a.district]];
+  if (!a.city || !a.district) {
+    // 找那條路在哪些縣市、區：寫了縣市就只留那個縣市的
+    const roads = await photonOnce([a.road, a.district, a.city].filter(Boolean).join(', '), near).catch(() => []);
+    const seen = new Set();
+    areas = roads
+      .filter((r) => r.city && r.district && [r.street, r.name].some((x) => plain(x).startsWith(plain(a.road).replace(/\d+[巷弄].*$/, ''))))
+      .filter((r) => (!a.city || sameText(r.city, a.city)) && (!a.district || sameText(r.district, a.district)))
+      .map((r) => [plain(r.city), plain(r.district)])
+      .filter(([c, d]) => !seen.has(c + d) && seen.add(c + d))
+      .slice(0, near ? 1 : ADDRESS_AREAS); // 知道出發點時只查最近的那個地區
+  }
+  const found = [];
+  for (const [city, district] of areas) {
+    const full = `${city}${district}${a.road}${a.number}號`;
+    const list = await tdx(`advanced/V3/Map/GeoCode/Coordinate/Address/${encodeURIComponent(full)}`).catch(() => []);
+    for (const r of list) {
+      // 查不到時 TDX 會回傳不相干的近似地址（例如別區的巷子），路名和門牌要對得上才採用
+      if (!plain(r.Address).includes(`${a.road}${a.number}號`)) continue;
+      const [lng, lat] = r.Geometry.match(/[\d.]+/g).map(Number);
+      found.push({ name: `${a.road}${a.number}號`, label: r.Address, lat, lng, area: district, road: false, exact: true });
+    }
+  }
+  return found;
+}
+
 // 常見簡稱：「101」在地圖資料裡是台 101 線公路
 const ALIASES = { 101: '台北101' };
 
-// 排序：名稱相符的優先、道路排後面（例如「101」查到台 101 線）、離出發點近的優先；
-// 兩個服務常查到同一個地點，100 公尺內只留一個
+// 排序：門牌完全對上的最優先、名稱相符的優先、道路排後面（例如「101」查到台 101 線）、離出發點近的優先；
+// 幾個服務常查到同一個地點，100 公尺內只留一個
 function rank(results, q, near) {
-  const score = (r) => (r.name === q ? -10 : r.name?.includes(q) ? -3 : 0) + (r.road ? 20 : 0)
+  const score = (r) => (r.exact ? -30 : 0) + (r.name === q ? -10 : r.name?.includes(q) ? -3 : 0) + (r.road ? 20 : 0)
     + (near ? distance(near, r) / 1000 : 0);
   const sorted = results.map((r) => ({ r, s: score(r) })).sort((a, b) => a.s - b.s).map((x) => x.r);
   return sorted.filter((r, i) => !sorted.slice(0, i).some((x) => distance(x, r) < 100));
@@ -212,10 +265,10 @@ function geocode(text, near) {
   const key = near ? `${q}@${near.lat.toFixed(1)},${near.lng.toFixed(1)}` : q;
   if (geocodeCache.has(key)) return Promise.resolve(geocodeCache.get(key));
   const job = geocodeQueue.then(async () => {
-    let found = [];
+    let found = await tdxAddress(q, near).catch(() => []);
     if (Date.now() >= nominatimDownUntil) {
       try {
-        found = await nominatim(q, near);
+        found = found.concat(await nominatim(q, near));
       } catch {
         nominatimDownUntil = Date.now() + NOMINATIM_COOLDOWN_MS;
       }
@@ -404,56 +457,98 @@ const PLAN_BIKE_NEAR_M = 1500;   // 全程騎 YouBike 時，借還車站最遠�
 const SHORT_WALK_M = 400;         // 沒開步行時，這麼近還是走路
 const ACCESS_BIKE_PICK_M = 2000; // 使用者指定騎 YouBike 時，借還車站可以遠一點
 const BIKE_CHOICES = 5;          // 列出幾個借／還車站讓使用者換
-const ACCESS_KINDS = new Set(['auto', 'walk', 'youbike', 'bus', 'taxi', 'uber']);
+const ACCESS_KINDS = new Set(['auto', 'walk', 'youbike', 'bus', 'metro', 'taxi', 'uber']);
+const WALK_PREFER_M = 500;       // 自動選時，再遠就改用 YouBike、公車等（除非附近都沒有）
+const METRO_ACCESS_MIN_M = 1000; // 太近不值得進出捷運站
+const BIKE_DOCK_S = 2 * 60;      // 借車、還車（刷卡、找車柱）大約花的時間
 
 // 起訖點與車站之間騎 YouBike：走到借車站 → 騎到還車站 → 走過去。
-// 使用者選的借／還車站（pref.pickup / pref.dropoff）在附近才採用，否則用最近有車／有位的站
+// 使用者選的借／還車站（pref.pickup / pref.dropoff）在附近才採用，否則從附近有車／有位的站挑全程最快的組合
+// （最近的站借光時，不會硬繞到遠的站；繞太遠就會比走路慢，自動選時改走路）
 async function bikeAccess(from, to, pref, maxM) {
   const stations = await getStations();
   const pickups = nearest(stations, from, (s) => s.active && s.bikes > 0, BIKE_CHOICES).filter((s) => s.distance <= maxM);
   const dropoffs = nearest(stations, to, (s) => s.active && s.docks > 0, BIKE_CHOICES).filter((s) => s.distance <= maxM);
-  const pickup = pickups.find((s) => s.id === pref.pickup) || pickups[0];
-  const dropoff = dropoffs.find((s) => s.id === pref.dropoff && s.id !== pickup?.id) || dropoffs.find((s) => s.id !== pickup?.id);
-  if (!pickup || !dropoff) return null;
-  const legs = [estimateRoute('foot', from, pickup), estimateRoute('bike', pickup, dropoff), estimateRoute('foot', dropoff, to)];
-  return { kind: 'youbike', pickup, dropoff, pickups, dropoffs, ...summarize(legs) };
+  const legsOf = (p, d) => [estimateRoute('foot', from, p), estimateRoute('bike', p, d), estimateRoute('foot', d, to)];
+  const time = (legs) => legs.reduce((n, l) => n + l.duration, 0);
+  const pickupOk = pickups.filter((s) => !pref.pickup || s.id === pref.pickup);
+  const dropoffOk = dropoffs.filter((s) => !pref.dropoff || s.id === pref.dropoff);
+  let best = null;
+  for (const p of pickupOk.length ? pickupOk : pickups) {
+    for (const d of dropoffOk.length ? dropoffOk : dropoffs) {
+      if (d.id === p.id) continue;
+      const legs = legsOf(p, d);
+      if (!best || time(legs) < time(best.legs)) best = { pickup: p, dropoff: d, legs };
+    }
+  }
+  if (!best) return null;
+  // 借車、還車各要一點時間，比走路快一些才值得騎
+  return { kind: 'youbike', pickup: best.pickup, dropoff: best.dropoff, pickups, dropoffs, ...summarize(best.legs, time(best.legs) + BIKE_DOCK_S) };
 }
 
-// 自動選：近就走路；遠的話先用直線估算比較公車、YouBike、計程車，
-// 選定後再由 refine 換成實際路線，避免每個候選車站都呼叫路線服務。
-// allow：使用者開啟的交通工具（youbike／bus／uber），沒給就全部可用；都不能用時只好走路
-async function autoAccess(from, to, allow) {
-  const ok = (k) => !allow || allow.has(k);
+// 接駁在一小時內開始才用公車即時到站時間（例如火車幾小時後才到站，現在的到站時間沒有參考價值）
+const SOON_MIN = 60;
+function isSoon(at) {
+  if (!at) return true;
+  const now = taipeiNow();
+  return at.date === now.date && Math.abs(at.minutes - now.minutes) <= SOON_MIN;
+}
+
+// 火車站與起訖點之間搭捷運（例如松山車站 → 台北101）。到捷運站的接駁不再搭捷運，
+// 先用估算的路線，等選定班次後再由 refineAccess 換成實際路線
+async function metroAccess(from, to, allow, at) {
+  const inner = makeConnect({ allow, noMetro: true });
+  inner.refine = async (a) => a;
+  const r = await planMetro(from, to, { in: inner, out: inner }, {}, at);
+  const o = r.options[0];
+  // 知道大概幾點到車站時（at），捷運已收班就不建議；不知道時只在畫面上提醒營運時間
+  if (!o || (at && o.closed)) return null;
+  return { kind: 'metro', ...summarize([...o.walkIn.legs, ...o.rides, ...o.walkOut.legs], o.duration) };
+}
+
+// 自動選：500 公尺內走路；再遠就比較公車、YouBike、捷運、步行（2.5 公里內），選最快的
+// （公車要等很久時自然會選 YouBike；附近的站借光、要繞路才借得到時，走路比較快就走路），
+// 都沒有才叫車。先用直線估算，選定後再由 refine 換成實際路線，避免每個候選車站都呼叫路線服務。
+// allow：使用者開啟的交通工具（walk／youbike／bus／metro／uber），沒給就全部可用；都不能用時只好走路
+// noMetro：本身就是捷運的接駁，不再考慮捷運
+async function autoAccess(from, to, allow, noMetro, at) {
+  const ok = (k) => (!allow || allow.has(k)) && !(noMetro && k === 'metro');
   const d = distance(from, to);
   // 沒開「步行」時，只有很近才走路，其他用開啟的工具（例如叫 Uber 到捷運站）
-  const walkOk = ok('walk') ? d <= ACCESS_WALK_M : d <= SHORT_WALK_M;
-  if (walkOk) return { kind: 'walk', ...summarize([await route('foot', from, to)]) };
+  if (d <= (ok('walk') ? WALK_PREFER_M : SHORT_WALK_M)) return { kind: 'walk', ...summarize([await route('foot', from, to)]) };
 
-  const [bus, bike] = await Promise.all([
-    ok('bus') && planBus(from, to, estimateRoute).then((list) => list[0]).catch(() => null),
+  const [bus, bike, metro] = await Promise.all([
+    ok('bus') && planBus(from, to, estimateRoute, isSoon(at)).then((list) => list[0]).catch(() => null),
     ok('youbike') && bikeAccess(from, to, {}, ACCESS_BIKE_NEAR_M).catch(() => null),
+    ok('metro') && d > METRO_ACCESS_MIN_M && metroAccess(from, to, allow, at).catch(() => null),
   ]);
+  // 步行也一起比快慢；想多走路的人也可以在畫面上換成步行
+  const walk = ok('walk') && d <= ACCESS_WALK_M && { kind: 'walk', ...summarize([estimateRoute('foot', from, to)]) };
   const candidates = [
     bus && { kind: 'bus', ...summarize(bus.legs, bus.total.duration) },
     bike,
+    metro,
+    walk,
   ].filter(Boolean).sort((a, b) => a.duration - b.duration);
+  const brief = (list) => list.map(({ kind, duration }) => ({ kind, duration }));
   if (!ok('uber')) {
-    if (!candidates.length) return { kind: 'walk', ...summarize([estimateRoute('foot', from, to)]) };
-    return { ...candidates[0], alternatives: candidates.map(({ kind, duration }) => ({ kind, duration })) };
+    // forcedWalk：沒開步行、只是沒有其他方式，捷運規劃排序時會盡量避開
+    const pick = candidates[0] || { kind: 'walk', forcedWalk: true, ...summarize([estimateRoute('foot', from, to)]) };
+    return { ...pick, alternatives: brief(candidates) };
   }
   const taxi = { kind: allow ? 'uber' : 'taxi', ...summarize([estimateRoute('taxi', from, to)]) };
   // 有開步行時 Uber 只在其他方式慢很多時才建議；沒開步行就直接比快慢
   const prefer = ok('walk') ? TAXI_PREFER : 1;
   const pick = candidates[0] && candidates[0].duration <= taxi.duration * prefer ? candidates[0] : taxi;
-  const alternatives = [...candidates, taxi].map(({ kind, duration }) => ({ kind, duration }));
-  return { ...pick, alternatives };
+  return { ...pick, alternatives: brief([...candidates, taxi]) };
 }
 
-// 接駁方式：pref = { kind: auto／walk／youbike／bus／taxi／uber, pickup, dropoff }。
+// 接駁方式：pref = { kind: auto／walk／youbike／bus／metro／taxi／uber, pickup, dropoff }。
 // 指定的方式行不通（例如附近沒有 YouBike）就改用自動，並標記 fallback 讓畫面說明
 function makeConnect(pref = {}) {
   const kind = ACCESS_KINDS.has(pref.kind) ? pref.kind : 'auto';
-  const connect = async (from, to) => {
+  // at：大約幾點開始這段接駁（例如火車到站時間），捷運依這個時間算班距與營運時間
+  const connect = async (from, to, at) => {
     if (kind === 'walk') return { kind: 'walk', ...summarize([estimateRoute('foot', from, to)]) };
     // Uber 與計程車路線相同（開車），差在畫面上給叫車按鈕
     if (kind === 'taxi' || kind === 'uber') return { kind, ...summarize([estimateRoute('taxi', from, to)]) };
@@ -462,10 +557,14 @@ function makeConnect(pref = {}) {
       if (bike) return bike;
     }
     if (kind === 'bus') {
-      const bus = await planBus(from, to, estimateRoute).then((list) => list[0]).catch(() => null);
+      const bus = await planBus(from, to, estimateRoute, isSoon(at)).then((list) => list[0]).catch(() => null);
       if (bus) return { kind: 'bus', ...summarize(bus.legs, bus.total.duration) };
     }
-    const auto = await autoAccess(from, to, pref.allow);
+    if (kind === 'metro' && !pref.noMetro) {
+      const metro = await metroAccess(from, to, pref.allow, at).catch(() => null);
+      if (metro) return metro;
+    }
+    const auto = await autoAccess(from, to, pref.allow, pref.noMetro, at);
     return kind === 'auto' ? auto : { ...auto, fallback: kind };
   };
   connect.refine = refineAccess;
@@ -473,12 +572,12 @@ function makeConnect(pref = {}) {
 }
 
 // 規劃 API 的接駁參數：access／egress 是到車站、出站後的方式，inPickup 等是使用者選的 YouBike 站
-// allow：使用者開啟的交通工具，自動選接駁時只從這些裡面挑
-const accessPrefs = (q) => {
+// allow：使用者開啟的交通工具，自動選接駁時只從這些裡面挑；noMetro：捷運規劃本身的接駁不再搭捷運
+const accessPrefs = (q, noMetro = false) => {
   const allow = q.allow != null ? new Set(String(q.allow).split(',')) : null;
   return {
-    in: makeConnect({ kind: q.access, pickup: q.inPickup, dropoff: q.inDropoff, allow }),
-    out: makeConnect({ kind: q.egress, pickup: q.outPickup, dropoff: q.outDropoff, allow }),
+    in: makeConnect({ kind: q.access, pickup: q.inPickup, dropoff: q.inDropoff, allow, noMetro }),
+    out: makeConnect({ kind: q.egress, pickup: q.outPickup, dropoff: q.outDropoff, allow, noMetro }),
   };
 };
 
@@ -576,13 +675,23 @@ app.get('/api/plan', wrap(async (req, res) => {
     });
   }
 
-  // 使用者可從候選清單指定站點
+  // 使用者可從候選清單指定站點；沒指定時挑全程最快的借還組合（最近的站借光時，不硬繞去遠的站）
+  const fastest = (() => {
+    let best = null;
+    for (const p of pickups) {
+      for (const d of dropoffs) {
+        const t = [estimateRoute('foot', from, p), estimateRoute('bike', p, d), estimateRoute('foot', d, to)].reduce((n, l) => n + l.duration, 0);
+        if (!best || t < best.t) best = { p, d, t };
+      }
+    }
+    return best;
+  })();
   const pickup = pickups.find((s) => s.id === req.query.pickup) ||
     nearest(stations, from, (s) => s.id === req.query.pickup && s.bikes > 0, 1)[0] ||
-    pickups[0];
+    fastest.p;
   const dropoff = dropoffs.find((s) => s.id === req.query.dropoff) ||
     nearest(stations, to, (s) => s.id === req.query.dropoff && s.docks > 0, 1)[0] ||
-    dropoffs[0];
+    fastest.d;
 
   // 從捷運站出發（mrt=1）時，從最適合的出口開始走
   const exitPick = req.query.mrt === '1' ? bestExit(exits, from, pickup) : null;
@@ -611,7 +720,9 @@ app.get('/api/plan', wrap(async (req, res) => {
       distance: steps.reduce((n, l) => n + l.distance, 0),
       duration: steps.reduce((n, l) => n + l.duration, 0),
     },
-    suggestWalk: pickup.id === dropoff.id || directWalk < 600,
+    // 很近、或騎車（含借還車時間）沒有比直接走路快
+    suggestWalk: pickup.id === dropoff.id || directWalk < 600 ||
+      estimateRoute('foot', from, to).duration <= fastest.t + BIKE_DOCK_S,
   });
 }));
 
@@ -675,7 +786,7 @@ app.get('/api/metro', wrap(async (req, res) => {
   const from = parsePoint(req.query.from);
   const to = parsePoint(req.query.to);
   if (!from || !to) return res.status(400).json({ error: '請提供出發點與目的地' });
-  res.json(await planMetro(from, to, accessPrefs(req.query), { board: req.query.board, alight: req.query.alight }));
+  res.json(await planMetro(from, to, accessPrefs(req.query, true), { board: req.query.board, alight: req.query.alight }));
 }));
 
 app.get('/api/metro/map', (req, res) => res.json(metroMap()));

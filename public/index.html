@@ -427,7 +427,7 @@
       if (mode === 'bus') return api('/api/bus?' + params);
       if (['tra', 'thsr', 'metro'].includes(mode)) {
         // 到車站／出站後只用有開啟的工具；沒開步行時只有很近才走路。access／egress 是使用者在這段指定的方式
-        params.set('allow', [tools.has('walk') && 'walk', tools.has('bike') && 'youbike', tools.has('bus') && 'bus', tools.has('uber') && 'uber'].filter(Boolean).join(','));
+        params.set('allow', [tools.has('walk') && 'walk', tools.has('bike') && 'youbike', tools.has('bus') && 'bus', tools.has('metro') && 'metro', tools.has('uber') && 'uber'].filter(Boolean).join(','));
         set(['access', 'egress', 'inPickup', 'inDropoff', 'outPickup', 'outDropoff', 'board', 'alight']);
       }
       if (mode === 'metro') return api('/api/metro?' + params);
@@ -696,7 +696,7 @@
 
       show(`
         ${p.demo ? '<div class="card demo">⚠️ 示範模式：可借/可還數字為模擬資料</div>' : ''}
-        ${p.suggestWalk ? '<div class="card demo">起訖點很近，直接走路可能更快</div>' : ''}
+        ${p.suggestWalk ? '<div class="card demo">附近的 YouBike 站要繞路（或起訖點很近），直接走路可能更快</div>' : ''}
         <div class="card">
           <div class="muted">全程約</div>
           <div class="big">${min(p.total.duration)}・${km(p.total.distance)}</div>
@@ -838,7 +838,7 @@
       if (!r.options.length) {
         stopNav();
         layer.clearLayers();
-        return show(`<div class="card err">附近 600 公尺內找不到可以到達的公車（目前只支援台北市、新北市，最多轉乘一次）</div>
+        return show(`<div class="card err">附近 600 公尺內找不到可以到達的公車（最多轉乘一次；偏遠地區班次少，可能沒有資料）</div>
           ${nearbyHtml(r.nearby)}`);
       }
       showBusOption(0);
@@ -1070,14 +1070,14 @@
               <span class="muted">・${x.transfers ? `轉乘 ${x.transfers} 次` : '直達'}${fare(x)}・抵達約 ${hhmm(x.reach)}</span></div>
             <div class="muted">${esc(x.rides[0].board.name)} → ${esc(x.rides.at(-1).alight.name)}</div>
           </div>`).join('')}
-        ${accessCard(o.walkIn, `到${o.rides[0].board.name}站`, true)}
+        ${accessCard(o.walkIn, `到${o.rides[0].board.name}站`, true, true)}
         <div class="card">
           <h2>路線說明</h2>
           ${stages.map((st, i) => stageHtml(st, i, detail(st))).join('')}
           ${est}
           ${navButtons}
         </div>
-        ${accessCard(o.walkOut, `從${o.rides.at(-1).alight.name}站到目的地`, false)}
+        ${accessCard(o.walkOut, `從${o.rides.at(-1).alight.name}站到目的地`, false, true)}
         ${stationChoices(r.boardChoices, r.choice.board || o.rides[0].board.name, 'board', '改從其他站上車（例如騎 YouBike 到不用轉乘的站）')}
         ${stationChoices(r.alightChoices, r.choice.alight || o.rides.at(-1).alight.name, 'alight', '改在其他站下車')}
         ${o.fare.total != null ? `<div class="card"><h2>💰 票價約 ${price(o.fare.total)}</h2>
@@ -1087,7 +1087,7 @@
     }
 
     // ---------- 火車站接駁（步行／公車／YouBike／計程車） ----------
-    const ACCESS = { walk: '🚶 步行', bus: '🚌 公車', youbike: '🚲 YouBike', taxi: '🚕 計程車', uber: '🚗 Uber' };
+    const ACCESS = { walk: '🚶 步行', bus: '🚌 公車', youbike: '🚲 YouBike', metro: '🚇 捷運', taxi: '🚕 計程車', uber: '🚗 Uber' };
     const LEG_ICON = { foot: '🚶', bus: '🚌', bike: '🚲', taxi: '🚕', metro: '🚇' };
     const endOf = (leg, last) => { const [lat, lng] = last ? leg.path.at(-1) : leg.path[0]; return { lat, lng }; };
 
@@ -1096,23 +1096,34 @@
       return a.legs.map((leg, i) => {
         const next = a.legs[i + 1];
         const last = !next;
-        const from = leg.mode === 'bus' ? leg.board : endOf(leg, false);
-        const to = last ? finalTo : leg.mode === 'bus' ? leg.alight : next.mode === 'bus' ? next.board : endOf(leg, true);
+        const ride = leg.mode === 'bus' || leg.mode === 'metro';
+        const from = ride ? leg.board : endOf(leg, false);
+        const to = last ? finalTo : ride ? leg.alight : next.mode === 'bus' || next.mode === 'metro' ? next.board : endOf(leg, true);
+        // 搭捷運的接駁（例如火車到松山站再轉捷運）裡的 YouBike 段沒有 a.pickup／a.dropoff
+        const pickup = a.pickup?.name || '', dropoff = a.dropoff?.name || '';
         let title, arrive;
         if (leg.mode === 'bus') {
           title = `搭 ${leg.route}（${leg.headsign}）到「${leg.alight.name}」`;
           arrive = `請在「${leg.alight.name}」下車 🔔`;
+        } else if (leg.mode === 'metro') {
+          title = `${leg.route}（${leg.headsign}）到${leg.alight.name}`;
+          arrive = next?.mode === 'metro'
+            ? `請在${leg.alight.name}站下車，轉乘${next.route}（${next.headsign}）`
+            : `到站了！請在${leg.alight.name}站下車`;
         } else if (leg.mode === 'bike') {
-          title = `騎 YouBike 到還車站：${a.dropoff.name}`;
-          arrive = `已到達還車站「${a.dropoff.name}」，請還車`;
+          title = `騎 YouBike 到還車站${dropoff && '：' + dropoff}`;
+          arrive = `已到達還車站${dropoff && '「' + dropoff + '」'}，請還車`;
         } else if (leg.mode === 'taxi') {
           title = `${a.kind === 'uber' ? '搭 Uber' : '搭計程車'}到${finalName}`;
         } else if (next?.mode === 'bus') {
           title = `步行到公車站「${next.board.name}」`;
           arrive = `已到達「${next.board.name}」站牌，請搭 ${next.route}（${next.headsign}）`;
+        } else if (next?.mode === 'metro') {
+          title = `步行到捷運${next.board.name}站`;
+          arrive = `已到達${next.board.name}站，請搭${next.route}（${next.headsign}）`;
         } else if (next?.mode === 'bike') {
-          title = `步行到借車站：${a.pickup.name}`;
-          arrive = `已到達借車站「${a.pickup.name}」，請借車 🚲`;
+          title = `步行到借車站${pickup && '：' + pickup}`;
+          arrive = `已到達借車站${pickup && '「' + pickup + '」'}，請借車 🚲`;
         } else {
           title = `步行到${finalName}`;
         }
@@ -1122,19 +1133,22 @@
 
     // 接駁說明：自動選的說明原因並列出其他方式；指定的方式行不通時說明改用什麼；
     // YouBike 列出附近的借／還車站，點一下就改用該站（可以只騎一段）
-    function accessCard(a, label, inbound) {
+    // noMetro：捷運本身的接駁，不能再換成搭捷運
+    function accessCard(a, label, inbound, noMetro = false) {
       const side = inbound ? 'in' : 'out';
       const fallback = a.fallback ? `<div class="card demo">${esc(label)}：附近沒有合適的${ACCESS[a.fallback]}，改用${ACCESS[a.kind]}</div>` : '';
-      // 這段接駁可以換成步行或其他有開啟的工具（例如不想走到捷運站，改叫 Uber）
-      const kinds = ['walk', tools.has('bike') && 'youbike', tools.has('bus') && 'bus', tools.has('uber') && 'uber'].filter(Boolean);
+      // 這段接駁可以換成步行或其他有開啟的工具（例如想多運動改走路，或不想走到捷運站改叫 Uber）
+      const kinds = ['walk', tools.has('bike') && 'youbike', tools.has('bus') && 'bus', !noMetro && tools.has('metro') && 'metro', tools.has('uber') && 'uber'].filter(Boolean);
       const nowKind = a.kind === 'taxi' ? 'uber' : a.kind;
       const switcher = kinds.length > 1 ? `<div class="modes">換成：${kinds.map((k) => `<button type="button" data-type="${inbound ? 'access' : 'egress'}"
         data-id="${k}" class="${k === nowKind ? 'on' : ''}">${ACCESS[k]}</button>`).join('')}</div>` : '';
-      if (a.kind === 'walk') {
-        return `${fallback}<div class="card"><h2>${esc(label)}：🚶 步行（約 ${min(a.duration)}・${km(a.distance)}）</h2>${switcher}</div>`;
-      }
       const others = (a.alternatives || []).filter((x) => x.kind !== a.kind)
         .map((x) => `${ACCESS[x.kind]} 約 ${min(x.duration)}`).join('・');
+      if (a.kind === 'walk') {
+        // 自動選走路：其他方式不會比較快（例如附近 YouBike 借光、要繞路）
+        const why = others ? `<div class="muted">走路最快。其他方式：${others}</div>` : '';
+        return `${fallback}<div class="card"><h2>${esc(label)}：🚶 步行（約 ${min(a.duration)}・${km(a.distance)}）</h2>${switcher}${why}</div>`;
+      }
       const bikeList = (list, sel, type) => list.map((s) => `
         <div class="alt ${s.id === sel ? 'sel' : ''}" data-type="${side}${type === 'pickup' ? 'Pickup' : 'Dropoff'}" data-id="${esc(s.id)}">
           <span>${esc(s.name)}<br><span class="muted">距離 ${km(s.distance)}</span></span>
@@ -1143,8 +1157,11 @@
       const from = inbound ? '出發點' : '車站', to = inbound ? '車站' : '目的地';
       return `${fallback}<div class="card"><h2>${esc(label)}：${a.alternatives ? '建議' : ''}${ACCESS[a.kind]}（約 ${min(a.duration)}・${km(a.distance)}）</h2>
         ${switcher}
-        <div class="muted">${a.alternatives ? `距離太遠不適合步行。${others ? `其他方式：${others}` : ''}` : '你選的接駁方式。'}
+        <div class="muted">${a.alternatives ? `超過 500 公尺，自動選最快的方式。${others ? `其他方式：${others}` : ''}` : '你選的接駁方式。'}
         ${a.kind === 'bus' && !inbound ? '<br>下車後的公車等車時間為估計值，出站時請再確認到站時間。' : ''}
+        ${a.kind === 'metro' ? '<br>' + a.legs.filter((l) => l.mode === 'metro')
+          .map((l) => `${esc(l.route)}（${esc(l.headsign)}）${esc(l.board.name)} → ${esc(l.alight.name)}`).join('，轉乘 ')
+          + '<br>捷運大約 06:00～24:00 營運，深夜到站請改用其他方式。' : ''}
         ${a.kind === 'youbike' ? `<br>借車站「${esc(a.pickup.name)}」可借 ${a.pickup.bikes} 台，還車站「${esc(a.dropoff.name)}」可還 ${a.dropoff.docks} 位（現在的數字）。` : ''}</div>
         ${a.kind === 'taxi' || a.kind === 'uber' ? `<div>💰 車資 <b>${fareText(uberFare(a.distance, a.duration))}</b></div>
           <div class="links">${uberA(endOf(a.legs[0], false), endOf(a.legs[0], true), '🚗 用 Uber 叫車這段')}</div>
@@ -1164,6 +1181,17 @@
     function fareCard(t) {
       if (!t.fare) return '';
       const cell = (n) => `<td>${n ? price(n) : '—'}</td>`;
+      // 台鐵只有一種車廂，票價依車種
+      if (t.fare.tra) {
+        return `<div class="card"><h2>💰 票價：${esc(t.origin.name)} → ${esc(t.dest.name)}（${esc(t.type)}）</h2>
+          <table class="fares">
+            <tr><td>全票</td>${cell(t.fare.full.standard)}</tr>
+            <tr><td>優待（孩童／敬老／愛心）</td>${cell(t.fare.concession.standard)}</tr>
+          </table>
+          <p class="hint">單程票價，依車種計價；用電子票證搭區間車另有優惠，以台鐵公告為準。</p>
+          <div class="links"><a target="_blank" rel="noopener" href="https://tip.railway.gov.tw/tra-tip-web/tip">🎫 前往台鐵訂票</a></div>
+        </div>`;
+      }
       const row = (name, f) => `<tr><td>${name}</td>${cell(f.standard)}${cell(f.business)}${cell(f.free)}</tr>`;
       return `<div class="card"><h2>💰 票價：${esc(t.origin.name)} → ${esc(t.dest.name)}</h2>
         ${t.seats ? `<div class="chips">${esc(t.no)} 次剩餘座位：${seatHtml(t.seats)}</div>` : ''}

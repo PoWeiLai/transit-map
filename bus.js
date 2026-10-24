@@ -1,11 +1,42 @@
-// 公車轉乘規劃（台北市＋新北市公開資料，不需金鑰）
+// 公車轉乘規劃：台北市＋新北市用公開資料（不需金鑰），其他縣市與公路／國道客運用交通部 TDX
 import { gunzipSync } from 'node:zlib';
 import { distance } from './geo.js';
+import { tdx, hasTdx, daily, cached } from './tdx.js';
 
 const BASE = 'https://tcgbusfs.blob.core.windows.net/';
 const SOURCES = ['blobbus', 'ntpcbus']; // 台北市、新北市
 const STATIC_MS = 24 * 60 * 60 * 1000;  // 路線、站牌一天更新一次
 const ETA_MS = 30 * 1000;               // 到站時間 30 秒
+
+// 雙北以外的縣市（TDX 的 City 名稱），用概略的經緯度範圍判斷起訖點在哪些縣市，
+// 只載入用得到的縣市；邊界附近會同時載入相鄰縣市，跨縣市轉乘也找得到
+const CITIES = [
+  // [City, 南, 北, 西, 東]
+  ['Keelung', 25.05, 25.20, 121.62, 121.82],
+  ['Taoyuan', 24.58, 25.13, 120.98, 121.48],
+  ['Hsinchu', 24.70, 24.86, 120.88, 121.04],
+  ['HsinchuCounty', 24.40, 24.96, 120.95, 121.42],
+  ['MiaoliCounty', 24.25, 24.75, 120.60, 121.27],
+  ['Taichung', 23.98, 24.45, 120.45, 121.46],
+  ['ChanghuaCounty', 23.78, 24.21, 120.23, 120.70],
+  ['NantouCounty', 23.43, 24.25, 120.60, 121.35],
+  ['YunlinCounty', 23.49, 23.85, 120.12, 120.74],
+  ['Chiayi', 23.44, 23.52, 120.39, 120.50],
+  ['ChiayiCounty', 23.15, 23.65, 120.10, 120.95],
+  ['Tainan', 22.88, 23.42, 120.02, 120.67],
+  ['Kaohsiung', 22.45, 23.47, 120.15, 121.05],
+  ['PingtungCounty', 21.89, 22.88, 120.40, 120.92],
+  ['YilanCounty', 24.30, 24.99, 121.30, 121.98],
+  ['HualienCounty', 23.09, 24.38, 121.27, 121.75],
+  ['TaitungCounty', 21.90, 23.45, 120.73, 121.58], // 含綠島、蘭嶼
+  ['PenghuCounty', 23.18, 23.80, 119.30, 119.75],
+  ['KinmenCounty', 24.38, 24.53, 118.20, 118.50],
+  ['LienchiangCounty', 25.90, 26.40, 119.85, 120.55], // 馬祖
+];
+// 雙北範圍：這裡面的查詢只用台北市、新北市資料（加上相鄰縣市）
+const TAIPEI_AREA = [24.67, 25.30, 121.28, 122.01];
+const INTERCITY = 'InterCity'; // 公路客運、國道客運（全台一份）
+const INTERCITY_SPEED = 8;     // m/s，公路／國道客運停站少、常走快速道路
 
 const NEAR_M = 600;          // 出發點／目的地多遠內的站牌
 const MIN_RIDE_M = 700;      // 坐太短不如走路
@@ -37,20 +68,38 @@ function addToGrid(grid, item) {
   grid.get(k).push(item);
 }
 
-// 附近 3×3 格內、距離 radius 以內的項目
-function* nearGrid(grid, point, radius) {
+// 附近 3×3 格內、距離 radius 以內的項目；grids 可以是多份資料各自的索引
+function* nearGrid(grids, point, radius) {
   const r = Math.floor(point.lat / GRID), c = Math.floor(point.lng / GRID);
-  for (let i = r - 1; i <= r + 1; i++) {
-    for (let j = c - 1; j <= c + 1; j++) {
-      for (const item of grid.get(`${i},${j}`) || []) {
-        const d = distance(point, item.stop);
-        if (d <= radius) yield { ...item, d };
+  for (const grid of [grids].flat()) {
+    for (let i = r - 1; i <= r + 1; i++) {
+      for (let j = c - 1; j <= c + 1; j++) {
+        for (const item of grid.get(`${i},${j}`) || []) {
+          const d = distance(point, item.stop);
+          if (d <= radius) yield { ...item, d };
+        }
       }
     }
   }
 }
 
 // ---------- 資料 ----------
+
+// lines：每條路線的每個方向，站牌依序排好；算出沿線累計距離並建立空間索引
+function indexLines(lines) {
+  const grid = new Map();
+  for (const line of lines.values()) {
+    line.stops.sort((a, b) => a.seq - b.seq);
+    // 累計沿線距離，用來估算搭乘時間
+    let acc = 0;
+    line.stops.forEach((s, i) => {
+      if (i) acc += distance(line.stops[i - 1], s);
+      s.along = acc;
+      addToGrid(grid, { line, i, stop: s });
+    });
+  }
+  return { lines, grid };
+}
 
 let network = null;
 let networkAt = 0;
@@ -63,7 +112,6 @@ async function getNetwork() {
   ]);
 
   const info = new Map(routes.map((r) => [r.Id, r]));
-  // 每條路線的每個方向 = 一條 line，站牌依序排好
   const lines = new Map();
   for (const s of stops) {
     const key = `${s.routeId}_${s.goBack}`;
@@ -73,6 +121,7 @@ async function getNetwork() {
         key,
         name: r?.nameZh || String(s.routeId),
         headsign: r ? `往${s.goBack === '0' ? r.destinationZh : r.departureZh}` : '',
+        speed: BUS_SPEED,
         stops: [],
       });
     }
@@ -87,26 +136,79 @@ async function getNetwork() {
     });
   }
 
-  const grid = new Map();
-  for (const line of lines.values()) {
-    line.stops.sort((a, b) => a.seq - b.seq);
-    // 累計沿線距離，用來估算搭乘時間
-    let acc = 0;
-    line.stops.forEach((s, i) => {
-      if (i) acc += distance(line.stops[i - 1], s);
-      s.along = acc;
-      addToGrid(grid, { line, i, stop: s });
-    });
-  }
-
-  network = { lines, grid };
+  network = indexLines(lines);
   networkAt = Date.now();
   return network;
 }
 
+// TDX 的路線站序（一天抓一次存到硬碟），只留規劃用得到的欄位
+const tdxRoutes = (source) => daily(`bus-${source}`, async () => {
+  const path = source === INTERCITY ? 'v2/Bus/StopOfRoute/InterCity' : `v2/Bus/StopOfRoute/City/${source}`;
+  const list = await tdx(path, { $select: 'RouteUID,RouteName,SubRouteUID,SubRouteName,Direction,Stops' });
+  return list.map((r) => ({
+    route: r.RouteUID,
+    sub: r.SubRouteUID,
+    name: r.SubRouteName?.Zh_tw || r.RouteName?.Zh_tw || r.RouteUID,
+    dir: r.Direction,
+    stops: r.Stops.map((s) => [s.StopUID, s.StopSequence, s.StopName?.Zh_tw || '', s.StopPosition.PositionLat, s.StopPosition.PositionLon, s.StationID || s.StopUID]),
+  }));
+});
+
+// 到站時間的 key：TDX 的 StopUID 會被多條路線共用，要加上路線與方向
+const tdxStopId = (route, dir, stop) => `${route}_${dir}_${stop}`;
+
+const tdxNetworks = new Map();
+
+function getTdxNetwork(source) {
+  const hit = tdxNetworks.get(source);
+  if (hit && Date.now() - hit.at < STATIC_MS) return hit.value;
+  const value = tdxRoutes(source).then((routes) => {
+    const lines = new Map();
+    for (const r of routes) {
+      if (r.stops.length < 2) continue;
+      const key = `${r.sub}_${r.dir}`;
+      const stops = r.stops.map(([uid, seq, name, lat, lng, station]) => ({
+        id: tdxStopId(r.route, r.dir, uid), location: station, seq, name, lat, lng,
+      }));
+      stops.sort((a, b) => a.seq - b.seq);
+      lines.set(key, {
+        key,
+        name: r.name,
+        headsign: `往${stops.at(-1).name}`,
+        speed: source === INTERCITY ? INTERCITY_SPEED : BUS_SPEED,
+        stops,
+      });
+    }
+    return indexLines(lines);
+  });
+  value.catch(() => tdxNetworks.delete(source)); // 失敗下次重抓
+  tdxNetworks.set(source, { at: Date.now(), value });
+  return value;
+}
+
+const inBox = (p, [s, n, w, e], margin = 0.01) => p.lat >= s - margin && p.lat <= n + margin && p.lng >= w - margin && p.lng <= e + margin;
+
+// 這幾個點會用到哪些資料：雙北一律載入（已預先載入，最快），其他縣市與公路客運要有 TDX 金鑰
+function sourcesFor(points) {
+  if (!hasTdx()) return [];
+  const cities = CITIES.filter(([, ...box]) => points.some((p) => inBox(p, box))).map(([name]) => name);
+  // 都在雙北範圍內就不載入公路客運，維持原本的速度
+  const intercity = cities.length || points.some((p) => !inBox(p, TAIPEI_AREA, 0));
+  return intercity ? [...cities, INTERCITY] : cities;
+}
+
+// 取得所有用得到的路網；TDX 某個縣市失敗時略過，其他照樣能規劃
+async function getNetworks(points) {
+  const list = await Promise.all([
+    getNetwork(),
+    ...sourcesFor(points).map((s) => getTdxNetwork(s).catch(() => null)),
+  ]);
+  return list.filter(Boolean);
+}
+
 let etaCache = { at: 0, data: new Map() };
 
-async function getEta() {
+async function getTaipeiEta() {
   if (Date.now() - etaCache.at < ETA_MS) return etaCache.data;
   try {
     const lists = await Promise.all(SOURCES.map((s) => getGz(`${s}/GetEstimateTime.gz`)));
@@ -115,6 +217,33 @@ async function getEta() {
     // 到站時間抓不到時沿用舊資料，規劃照樣可用
   }
   return etaCache.data;
+}
+
+// TDX 的 StopStatus：0 正常、1 尚未發車、2 交管不停靠、3 末班車已過、4 今日未營運，換成與雙北相同的代碼
+const lastTdxEta = new Map();
+
+function getTdxEta(source) {
+  // 公路／國道客運的到站資料全台一份太大（約 15 MB），不抓，用預設等車時間
+  if (source === INTERCITY) return new Map();
+  return cached(`bus-eta:${source}`, ETA_MS, async () => {
+    const list = await tdx(`v2/Bus/EstimatedTimeOfArrival/City/${source}`, { $select: 'RouteUID,Direction,StopUID,EstimateTime,StopStatus' });
+    const data = new Map();
+    for (const e of list) {
+      const v = e.StopStatus === 0 && e.EstimateTime != null ? e.EstimateTime : e.StopStatus ? -e.StopStatus : NaN;
+      const id = tdxStopId(e.RouteUID, e.Direction, e.StopUID);
+      // 同一站有多筆（不同子路線）時取最快到的
+      const cur = data.get(id);
+      if (cur == null || (v >= 0 && (cur < 0 || v < cur))) data.set(id, v);
+    }
+    lastTdxEta.set(source, data);
+    return data;
+  }).catch(() => lastTdxEta.get(source) || new Map()); // 抓不到沿用舊資料
+}
+
+// 各份資料的站牌 id 不會重複，合併成一個查詢
+async function getEta(points) {
+  const maps = await Promise.all([getTaipeiEta(), ...sourcesFor(points).map(getTdxEta)]);
+  return { get: (id) => { for (const m of maps) if (m.has(id)) return m.get(id); } };
 }
 
 // -1 尚未發車、-2 交管不停靠、-3 末班車已過、-4 今日未營運
@@ -136,14 +265,14 @@ function waitFor(eta, walkTime) {
 
 const walkTime = (m) => (m * WALK_DETOUR) / WALK_SPEED;
 const rideLength = (line, i, j) => line.stops[j].along - line.stops[i].along;
-const rideTime = (line, i, j) => rideLength(line, i, j) / BUS_SPEED;
+const rideTime = (line, i, j) => rideLength(line, i, j) / line.speed;
 
 // ---------- 規劃 ----------
 
 // 每條 line 在 point 附近最近的那個站
-function nearestPerLine(grid, point) {
+function nearestPerLine(grids, point) {
   const best = new Map();
-  for (const hit of nearGrid(grid, point, NEAR_M)) {
+  for (const hit of nearGrid(grids, point, NEAR_M)) {
     if (EXCLUDE.test(hit.line.name)) continue;
     const cur = best.get(hit.line.key);
     if (!cur || hit.d < cur.d) best.set(hit.line.key, hit);
@@ -151,11 +280,13 @@ function nearestPerLine(grid, point) {
   return best;
 }
 
-// 找出不轉乘及轉一次的方案，依估計總時間排序
-export async function planBus(from, to, route) {
-  const [{ grid }, eta] = await Promise.all([getNetwork(), getEta()]);
-  const boards = nearestPerLine(grid, from);
-  const alights = nearestPerLine(grid, to);
+// 找出不轉乘及轉一次的方案，依估計總時間排序。
+// live = false：不是現在要搭（例如火車幾小時後才到站），即時到站時間不適用，等車時間用預設值
+export async function planBus(from, to, route, live = true) {
+  const [networks, eta] = await Promise.all([getNetworks([from, to]), live ? getEta([from, to]) : new Map()]);
+  const grids = networks.map((n) => n.grid);
+  const boards = nearestPerLine(grids, from);
+  const alights = nearestPerLine(grids, to);
   const options = [];
 
   // 不用轉乘
@@ -287,8 +418,8 @@ async function buildOption(o, from, to, eta, route) {
 
 // 出發點附近的公車即時到站（每條路線方向取最近的站）
 export async function nearbyArrivals(point, limit = 15) {
-  const [{ grid }, eta] = await Promise.all([getNetwork(), getEta()]);
-  return [...nearestPerLine(grid, point).values()]
+  const [networks, eta] = await Promise.all([getNetworks([point]), getEta([point])]);
+  return [...nearestPerLine(networks.map((n) => n.grid), point).values()]
     .filter((h) => h.i < h.line.stops.length - 1) // 終點站上不了車
     .map((h) => {
       const e = eta.get(h.stop.id);
@@ -300,4 +431,8 @@ export async function nearbyArrivals(point, limit = 15) {
 }
 
 // 啟動時先載入，第一次查詢才不會等太久
-export const warmUp = () => Promise.all([getNetwork(), getEta()]);
+// 公路客運全台一份、第一次要抓約半分鐘，有金鑰就在背景先載入
+export const warmUp = () => {
+  if (hasTdx()) getTdxNetwork(INTERCITY).catch((e) => console.log('公路客運資料載入失敗：', e.message));
+  return Promise.all([getNetwork(), getTaipeiEta()]);
+};

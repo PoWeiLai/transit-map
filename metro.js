@@ -10,6 +10,9 @@ const MAX_ACCESS_M = 15000;     // 離最近的捷運站太遠就不規劃
 const SAME_STATION_S = 60;      // 同一站換到另一條路線（同月台或換邊）
 const TRANSFER_PENALTY_S = 120; // 轉乘不舒服，同樣快時選少轉乘的（只影響排序）
 const MAX_OPTIONS = 3;
+const WALK_FREE_S = 7 * 60;     // 走到車站約 500 公尺內不算懲罰
+const WALK_WEIGHT = 1;          // 再走更遠，排序時多算一倍時間（寧可搭車、轉乘，也不要走很遠）
+const FORCED_WALK_WEIGHT = 2;   // 使用者沒開步行、但只能走路時多算兩倍
 const BOARD_CHOICES = 6;          // 列出幾個上車／下車站讓使用者改選
 const BOARD_CHOICE_EXTRA_M = 3000;
 
@@ -162,6 +165,13 @@ function search(starts, startCost, minutes, holiday) {
   return best;
 }
 
+// 接駁裡走太遠的排序懲罰（秒）；a.forcedWalk 表示使用者沒開步行、只是沒有其他方式
+function walkPenalty(a) {
+  const weight = a.forcedWalk ? FORCED_WALK_WEIGHT : WALK_WEIGHT;
+  return a.legs.filter((l) => l.mode === 'foot')
+    .reduce((n, l) => n + Math.max(0, l.duration - WALK_FREE_S) * weight, 0);
+}
+
 // 把找到的路徑整理成一段一段的搭乘
 function rides(best, endId) {
   const { services, stations } = load();
@@ -270,14 +280,17 @@ export async function planMetro(from, to, connect, choice = {}, when = taipeiNow
       if (!end) return;
       const segments = rides(best, end);
       if (!segments.length) return;
-      const ride = best.get(end).cost - walkIns[oi].duration;
-      found.push({ oi, di, segments, total: best.get(end).cost + walkOuts[di].duration, ride });
+      // 轉乘懲罰只影響排序，顯示的時間要扣掉
+      const penalty = segments.filter((r) => r.transfer && !r.transfer.sameLine).length * TRANSFER_PENALTY_S;
+      const ride = best.get(end).cost - walkIns[oi].duration - penalty;
+      const total = best.get(end).cost + walkOuts[di].duration;
+      found.push({ oi, di, segments, total, ride, rank: total + walkPenalty(walkIns[oi]) + walkPenalty(walkOuts[di]) });
     });
   });
   if (!found.length) throw new Error('找不到可以搭捷運到達的路線（出發點和目的地可能在不同城市的捷運系統）');
 
-  // 依總時間排序，路線一樣（同樣的線、同樣的上下車站）只留一個
-  found.sort((a, b) => a.total - b.total);
+  // 依總時間（含走太遠的懲罰）排序，路線一樣（同樣的線、同樣的上下車站）只留一個
+  found.sort((a, b) => a.rank - b.rank);
   const seen = new Set();
   const picked = found.filter((f) => {
     const sig = f.segments.map((r) => `${r.service.line}:${r.leg.board.name}>${r.leg.alight.name}`).join('/');
@@ -301,9 +314,10 @@ export async function planMetro(from, to, connect, choice = {}, when = taipeiNow
       reach: Math.round(when.minutes + duration / 60),
       fare: fareOf(f.segments),
       closed: sv.running ? null : { open: sv.open, close: sv.close },
+      rank: duration + walkPenalty(walkIn) + walkPenalty(walkOut),
     };
   }));
-  options.sort((a, b) => a.duration - b.duration);
+  options.sort((a, b) => a.rank - b.rank);
   const brief = (list) => list.map(({ name, distance: d, op }) => ({ name, distance: d, operator: load().operators[op] }));
   return { origins, dests, options, now: when, holiday, boardChoices: brief(boardChoices), alightChoices: brief(alightChoices), choice };
 }

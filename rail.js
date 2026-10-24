@@ -6,6 +6,10 @@ const MAX_TRAINS = 12;
 const LIVE_MS = 2 * 60 * 1000;
 const SEAT_MS = 5 * 60 * 1000;
 const SEAT_TIMEOUT_MS = 8000; // 座位只是參考資訊，TDX 額度用完時不要讓整個規劃卡住
+const FARE_MS = 24 * 60 * 60 * 1000;
+const ACCESS_GUESS_MIN = 30; // 估計到站時間：到車站與等車大約多久
+// 台鐵票價的 TrainType：1 太魯閣、2 普悠瑪、3 自強、11 自強（3000）同價；4 莒光；5 復興、6 區間、10 區間快同價；7 普快
+const TRA_FARE_TYPE = { 太魯閣: [1], 普悠瑪: [2], 自強: [3, 11], 莒光: [4], 復興: [5], 區間: [6], 區間快: [10], 普快: [7] };
 
 // 台鐵車種名稱很長（例：自強(推拉式自強號且無自行車車廂)），整理成常用叫法
 function traType(name) {
@@ -26,6 +30,7 @@ async function timetable(date, name, todayPath, datePath) {
 const SYSTEMS = {
   tra: {
     label: '台鐵',
+    speed: 60, // 平均車速（km/h，直線距離），只用來估計大概幾點到站
     async stations() {
       const { Stations } = await daily('tra-stations', () => tdx('v3/Rail/TRA/Station'));
       return Stations.map((s) => ({
@@ -57,9 +62,21 @@ const SYSTEMS = {
         return new Map(TrainLiveBoards.map((b) => [b.TrainNo, b.DelayTime]));
       }).catch(() => new Map()); // 額度用完時不顯示誤點，規劃照樣可用
     },
+    // 單程票價依車種不同；回傳 車種 → { full: { standard }, concession: { standard } }。
+    // 同一對車站有順、逆行兩種里程（例如經南迴），取近的那個
+    async fareOf(originId, destId, type) {
+      const list = await cached(`tra-fare:${originId}-${destId}`, FARE_MS, async () =>
+        (await tdx(`v3/Rail/TRA/ODFare/${originId}/to/${destId}`)).ODFares);
+      const codes = TRA_FARE_TYPE[type] || TRA_FARE_TYPE['區間'];
+      const f = list.filter((x) => codes.includes(x.TrainType)).sort((a, b) => a.TravelDistance - b.TravelDistance)[0];
+      if (!f) return null;
+      const price = (cls) => f.Fares.find((x) => x.TicketType === 1 && x.FareClass === cls)?.Price;
+      return { full: { standard: price(1) }, concession: { standard: price(3) }, tra: true };
+    },
   },
   thsr: {
     label: '高鐵',
+    speed: 200,
     async stations() {
       const list = await daily('thsr-stations', () => tdx('v2/Rail/THSR/Station'));
       return list.map((s) => ({
@@ -143,7 +160,11 @@ export async function planRail(system, from, to, connect, when = taipeiNow()) {
     sys.trains(when.date),
     today ? sys.delays() : new Map(),
     Promise.all(origins.map((o) => connect.in(from, o))),
-    Promise.all(dests.map((d) => connect.out(d, to))),
+    // 出站後的接駁（例如轉捷運）用大概的到站時間規劃：直線距離 ÷ 平均車速
+    Promise.all(dests.map((d) => connect.out(d, to, {
+      date: when.date,
+      minutes: when.minutes + Math.round(distance(origins[0], d) / 1000 / sys.speed * 60) + ACCESS_GUESS_MIN,
+    }))),
     sys.fares?.().catch(() => null), // 票價只是參考，抓不到照樣規劃
   ]);
   const byId = new Map(stations.map((s) => [s.id, s]));
@@ -233,9 +254,11 @@ export async function planRail(system, from, to, connect, when = taipeiNow()) {
     if (!seatsBy.has(id)) seatsBy.set(id, sys.seats && today ? sys.seats(id) : Promise.resolve(new Map()));
     return seatsBy.get(id);
   };
+  // 台鐵票價依車種、每對車站查一次
+  const fareOf = (o) => (sys.fareOf ? sys.fareOf(o.origin.id, o.dest.id, o.type).catch(() => null) : o.fare);
   await Promise.all(shown.map(async (o) => {
-    const [walkIn, walkOut, seats] = await Promise.all([refine(o.walkIn), refine(o.walkOut), seatsAt(o.origin.id)]);
-    Object.assign(o, { walkIn, walkOut, seats: seats.get(o.no)?.get(o.dest.id) || null });
+    const [walkIn, walkOut, seats, fare] = await Promise.all([refine(o.walkIn), refine(o.walkOut), seatsAt(o.origin.id), fareOf(o)]);
+    Object.assign(o, { walkIn, walkOut, fare, seats: seats.get(o.no)?.get(o.dest.id) || null });
     o.reach = Math.round(o.arrAt + walkOut.duration / 60);
   }));
   shown.sort((a, b) => a.reach - b.reach);

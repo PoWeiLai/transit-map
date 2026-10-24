@@ -4,7 +4,9 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 
 const CACHE_DIR = new URL('./data/cache/', import.meta.url);
 const TOKEN_URL = 'https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token';
-const API_BASE = 'https://tdx.transportdata.tw/api/basic/';
+const API_ROOT = 'https://tdx.transportdata.tw/api/';
+const API_BASE = `${API_ROOT}basic/`;
+const ADVANCED = 'advanced/';
 const MIN_INTERVAL_MS = 300; // 兩個請求之間至少間隔
 const MAX_RETRY = 2;
 const MAX_RESET_WAIT_S = 65; // 429 時最多等到下一分鐘額度恢復
@@ -48,9 +50,12 @@ function throttled(fn) {
   return job;
 }
 
-// path 例如 'v3/Rail/TRA/Station'，params 會自動加上 $format=JSON
+// path 例如 'v3/Rail/TRA/Station'，params 會自動加上 $format=JSON；
+// 進階服務（例如地址定位）用 'advanced/V3/Map/...'，參數是 format=JSON
 export async function tdx(path, params = {}) {
-  const url = `${API_BASE}${path}?${new URLSearchParams({ $format: 'JSON', ...params })}`;
+  const url = path.startsWith(ADVANCED)
+    ? `${API_ROOT}${path}?${new URLSearchParams({ format: 'JSON', ...params })}`
+    : `${API_BASE}${path}?${new URLSearchParams({ $format: 'JSON', ...params })}`;
   for (let attempt = 0; ; attempt++) {
     const res = await throttled(async () =>
       fetch(url, { headers: { Authorization: `Bearer ${await getToken()}` }, signal: AbortSignal.timeout(60000) }));
