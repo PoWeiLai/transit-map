@@ -248,6 +248,38 @@ async function tdxAddress(text, near) {
   return found;
 }
 
+// ---------- 從 Google 地圖貼回來的連結、座標 ----------
+// 查不到的地點，使用者可以到 Google 地圖找，再把分享連結或座標貼回來
+const COORDS = /^\s*\(?(-?\d{1,2}\.\d+)\s*[,，\s]\s*(-?\d{1,3}\.\d+)\)?\s*$/;
+// 只跟著 Google 地圖的網址走，避免伺服器被拿去連其他網站
+const GOOGLE_HOSTS = /^(maps\.app\.goo\.gl|goo\.gl|(www\.|maps\.)?google\.com(\.tw)?)$/;
+
+function coordsResult(lat, lng, name = '座標位置') {
+  if (!(lat >= 20 && lat <= 27 && lng >= 117 && lng <= 123)) return []; // 台灣附近才採用
+  return [{ name, label: `${name}（${lat.toFixed(5)}, ${lng.toFixed(5)}）`, lat, lng, exact: true }];
+}
+
+async function pastedPlace(text) {
+  const c = text.match(COORDS);
+  if (c) return coordsResult(Number(c[1]), Number(c[2]));
+  let url;
+  try { url = new URL(text.trim()); } catch { return null; }
+  if (!GOOGLE_HOSTS.test(url.hostname)) return null;
+  // 短網址（maps.app.goo.gl）要跟著轉址才看得到座標
+  const res = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(8000) });
+  const final = new URL(res.url);
+  if (!GOOGLE_HOSTS.test(final.hostname)) return [];
+  const href = decodeURIComponent(final.href);
+  const name = href.match(/\/place\/([^/@]+)/)?.[1].replace(/\+/g, ' ');
+  // !3d…!4d… 是地點本身的位置，@緯度,經度 只是畫面中心，優先用前者
+  const pos = href.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/) || href.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/) ||
+    (final.searchParams.get('q') || final.searchParams.get('ll') || '').match(COORDS);
+  if (pos) return coordsResult(Number(pos[1]), Number(pos[2]), name || 'Google 地圖的地點');
+  // 連結裡只有地名（例如 ?q=地址）：改查那個地名
+  const q = final.searchParams.get('q') || name;
+  return q ? geocode(q) : [];
+}
+
 // 常見簡稱：「101」在地圖資料裡是台 101 線公路
 const ALIASES = { 101: '台北101' };
 
@@ -609,6 +641,9 @@ const wrap = (fn) => (req, res) =>
 app.get('/api/geocode', wrap(async (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: '請輸入地點' });
+  // 貼上的 Google 地圖連結或座標；讀不到時回傳空的，畫面會再提供用 Google 地圖找的按鈕
+  const pasted = await pastedPlace(q).catch(() => []);
+  if (pasted) return res.json(pasted);
   res.json(await geocode(q, parsePoint(req.query.near)));
 }));
 

@@ -376,9 +376,19 @@
       if (q === '目前位置') return currentPosition();
       if (!q) throw new Error(emptyMsg);
       const results = await api('/api/geocode?' + new URLSearchParams({ q, ...(near && { near: `${near.lat},${near.lng}` }) }));
-      if (!results.length) throw new Error(`找不到「${q}」，請換個說法或直接點地圖`);
+      if (!results.length) {
+        const err = new Error(`找不到「${q}」，請換個說法或直接點地圖`);
+        err.query = q; // 畫面提供用 Google 地圖找的按鈕
+        throw err;
+      }
       return results[0];
     }
+
+    // 查不到的地點：到 Google 地圖找，找到後把分享連結或座標貼回輸入框（伺服器會從連結讀出位置）
+    const googleFix = (q) => `<div class="card">
+        <div class="links"><a target="_blank" rel="noopener" href="https://www.google.com/maps/search/${encodeURIComponent(q)}">🔎 在 Google 地圖搜尋「${esc(q)}」</a></div>
+        <p class="hint">在 Google 地圖找到地點後按「分享」→「複製連結」，貼回出發地或目的地欄位再查一次即可；也可以貼上座標（例如 24.13702, 120.64192）。</p>
+      </div>`;
     async function resolve(key, near) {
       return points[key] || (points[key] = await lookup($(key).value, { from: '請輸入出發點', vehicle: '請輸入取車位置' }[key], near));
     }
@@ -504,7 +514,7 @@
         drawStops(seq, back);
         showLeg(0);
       } catch (err) {
-        show(`<div class="card err">${esc(err.message)}</div>`);
+        show(`<div class="card err">${esc(err.message)}</div>${err.query ? googleFix(err.query) : ''}`);
       }
     }
     const toMin = (hhmm) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; };
