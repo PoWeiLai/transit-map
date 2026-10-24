@@ -4,6 +4,7 @@ import { distance } from './geo.js';
 import { planBus, nearbyArrivals, stillLoading, warmUp } from './bus.js';
 import { warmUp as warmUpParking } from './scooter.js';
 import { nearbyLots, costOf } from './vehicle.js';
+import { camerasAlong, warmUp as warmUpCameras } from './cameras.js';
 import { planRail, railStations, warmUp as warmUpRail } from './rail.js';
 import { tdx, hasTdx, taipeiNow } from './tdx.js';
 import { planMetro, metroMap } from './metro.js';
@@ -801,8 +802,11 @@ app.get('/api/vehicle', wrap(async (req, res) => {
   ]);
   const ride = legs[1];
   const steps = legs.filter(Boolean);
+  // 路線經過、拍得到這個方向的測速照相（導航時依距離提醒）
+  const cameras = ride.estimated ? [] : await camerasAlong(ride.path);
   res.json({
     kind,
+    cameras,
     from,
     to,
     vehicle,
@@ -865,6 +869,9 @@ app.listen(PORT, () => {
       .then(() => console.log('已載入今天的台鐵、高鐵時刻表'))
       .catch((e) => console.log('火車時刻表載入失敗：', e.message));
   }
+  warmUpCameras()
+    .then((list) => console.log(`已載入 ${list.length} 個測速照相點`))
+    .catch((e) => console.log('測速照相資料載入失敗：', e.message));
   warmUpParking()
     .then(([lots]) => console.log(`已載入 ${lots.length} 個有機車格的停車場`))
     .catch((e) => console.log('停車場資料載入失敗：', e.message));

@@ -58,6 +58,8 @@
     #nav .instr { font-size:20px; font-weight:700; margin:4px 0; }
     #nav .rest { font-size:13px; opacity:.8; }
     #nav .notice { background:#f5a000; color:#000; border-radius:8px; padding:8px 10px; margin-top:8px; font-weight:700; }
+    #nav .notice.cam { background:#dc2626; color:#fff; font-size:17px; }
+    .camicon { font-size:18px; line-height:1; text-shadow:0 0 3px #fff; }
     #nav button { margin-top:8px; background:transparent; color:#fff; border-color:#6b7280; font-size:13px; padding:5px 10px; }
     .navbtns { display:flex; gap:6px; }
     .navbtns button { flex:1; }
@@ -133,7 +135,9 @@
       <div class="dir"><span id="navArrow">⬆</span><span id="navDir"></span></div>
       <div class="rest" id="navRest"></div>
       <div class="notice" id="navNotice" hidden></div>
+      <div class="notice cam" id="navCam" hidden></div>
       <button type="button" id="navStop">結束導航</button>
+      <button type="button" id="navVoice">🔊 語音提醒：開</button>
     </div>
     <button type="button" id="formToggle">▲ 收起出發點、目的地</button>
     <form id="form">
@@ -1286,7 +1290,7 @@
       const stages = [
         walk1 && { leg: walk1, from, to: start, icon: '🚶', title: '步行到取車位置',
           arrive: `已到達取車位置，請用 App 解鎖 ${v.icon}` },
-        { leg: ride, from: start, to: end, icon: v.icon, title: pk ? `${v.verb}到停車場：${pk.name}` : `${v.verb}到目的地：${to.name}`,
+        { leg: ride, cameras: p.cameras, from: start, to: end, icon: v.icon, title: pk ? `${v.verb}到停車場：${pk.name}` : `${v.verb}到目的地：${to.name}`,
           arrive: pk ? `已到達「${pk.name}」${v.shared ? `，請停好車後在 App 還車` : '，請停車'}` : '🎉 已抵達目的地' },
         walk2 && { leg: walk2, from: pk, to, icon: '🚶', title: `步行到目的地：${to.name}`, arrive: '🎉 已抵達目的地' },
       ].filter(Boolean);
@@ -1294,6 +1298,10 @@
 
       drawLegs(p.legs, from, to);
       if (p.vehicle) L.marker([p.vehicle.lat, p.vehicle.lng], { icon: pin('#7c3aed', '車') }).bindPopup('取車位置').addTo(layer);
+      for (const c of p.cameras) {
+        L.marker([c.lat, c.lng], { icon: L.divIcon({ className: 'camicon', html: '📷', iconSize: [20, 20] }) })
+          .bindPopup(`<b>測速照相${c.limit ? `・速限 ${c.limit}` : ''}</b><br>${esc(c.address)}<br>拍攝方向：${esc(c.direction)}`).addTo(layer);
+      }
       const spaces = (s) => (s.available != null
         ? `${v.space}空位 <b class="${cls(s.available)}">${s.available}</b>${s.total ? `／${s.total}` : ''}`
         : s.total ? `<span class="muted">${v.space}位 ${s.total} 格</span>` : '<span class="muted">無即時車位</span>');
@@ -1322,6 +1330,9 @@
           ${est}
           ${navButtons}
         </div>
+        ${p.cameras.length ? `<div class="card"><h2>📷 沿路測速照相 ${p.cameras.length} 處</h2>
+          ${p.cameras.map((c) => `<div class="muted">${km(c.along)} 處・${c.limit ? `速限 ${c.limit}・` : ''}${esc(c.address)}</div>`).join('')}
+          <p class="hint">只列出拍得到你行進方向的固定測速（警政署公開資料）。導航時會在 500、300、100 公尺前用語音與震動提醒（iPhone 不支援震動）。</p></div>` : ''}
         <div class="card"><h2>💰 ${COST_TITLE[p.kind]}：${km(ride.distance)}・約 ${min(ride.duration)}</h2>${cost}
           <p class="hint">${COST_NOTE[p.kind]}</p></div>
         ${p.parkings.length ? `<div class="card"><h2>🅿️ 目的地附近可停${v.space}的停車場</h2>
@@ -1414,6 +1425,8 @@
       if (!simulate) enableCompass();
       $('nav').classList.add('on');
       $('navNotice').hidden = true;
+      $('navCam').hidden = true;
+      if (current.stages.some((st) => st.cameras?.length)) say('開始導航，會提醒前方測速照相');
       $('navInstr').textContent = '定位中…';
       $('nav').scrollIntoView({ block: 'start' });
       map.setZoom(18);
@@ -1531,6 +1544,54 @@
       document.querySelectorAll('.dirs li.now').forEach((li) => li.classList.remove('now'));
       const li = document.querySelector(`.dirs[data-stage="${nav.stage}"] li:nth-child(${nav.step + 1})`);
       if (li) li.classList.add('now');
+      cameraAlert(pos, st);
+    }
+
+    // ---------- 測速照相提醒：距離 500、300、100 公尺各提醒一次（語音＋震動），開過去就不再提醒 ----------
+    const CAMERA_ALERTS = [500, 300, 100];
+    const CAMERA_PASSED_M = 40;
+    let voiceOn = true;
+    try { voiceOn = localStorage.getItem('voice') !== 'off'; } catch { /* 沒有儲存空間就用預設 */ }
+    const voiceLabel = () => { $('navVoice').textContent = voiceOn ? '🔊 語音提醒：開' : '🔇 語音提醒：關'; };
+    voiceLabel();
+    $('navVoice').addEventListener('click', () => {
+      voiceOn = !voiceOn;
+      try { localStorage.setItem('voice', voiceOn ? 'on' : 'off'); } catch { /* 忽略 */ }
+      voiceLabel();
+      if (!voiceOn) window.speechSynthesis?.cancel();
+    });
+
+    function say(text) {
+      if (!voiceOn || !window.speechSynthesis) return;
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'zh-TW';
+      speechSynthesis.cancel();
+      speechSynthesis.speak(u);
+    }
+
+    function cameraAlert(pos, st) {
+      const cams = st.cameras || [];
+      nav.camDone ??= new Set();   // 已經開過去的
+      nav.camSaid ??= new Map();   // 每個點最後提醒過的距離門檻
+      let ahead = null;
+      cams.forEach((c, i) => {
+        const key = `${nav.stage}:${i}`;
+        if (nav.camDone.has(key)) return;
+        const d = dist(pos, c);
+        if (d < CAMERA_PASSED_M) { nav.camDone.add(key); return; }
+        if (d <= CAMERA_ALERTS[0] && (!ahead || d < ahead.d)) ahead = { c, d, key };
+      });
+      if (!ahead) { $('navCam').hidden = true; return; }
+      const { c, d, key } = ahead;
+      const limit = c.limit ? `，速限 ${c.limit}` : '';
+      $('navCam').textContent = `📷 前方 ${Math.round(d)} 公尺 測速照相${c.limit ? `・速限 ${c.limit}` : ''}`;
+      $('navCam').hidden = false;
+      const th = CAMERA_ALERTS.find((t, k) => d <= t && (CAMERA_ALERTS[k + 1] == null || d > CAMERA_ALERTS[k + 1]));
+      if (th != null && (nav.camSaid.get(key) ?? Infinity) > th) {
+        nav.camSaid.set(key, th);
+        say(`前方 ${th} 公尺，測速照相${limit}`);
+        navigator.vibrate?.([300, 150, 300]);
+      }
     }
 
     // 沿整條路線每約 8 公尺取一個點，用來在電腦上模擬走路／騎車
