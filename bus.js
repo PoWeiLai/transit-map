@@ -37,6 +37,9 @@ const CITIES = [
 const TAIPEI_AREA = [24.67, 25.30, 121.28, 122.01];
 const INTERCITY = 'InterCity'; // 公路客運、國道客運（全台一份）
 const INTERCITY_SPEED = 8;     // m/s，公路／國道客運停站少、常走快速道路
+const DOWNLOAD_MS = 3 * 60 * 1000; // 路線站序檔案很大，下載逾時放寬
+const LOAD_WAIT_MS = 8000;     // 查詢時最多等還沒載入的縣市這麼久，其餘在背景繼續載入，下次查詢就有
+const ETA_WAIT_MS = 5000;      // 即時到站抓太久就先用上一次的資料
 
 const NEAR_M = 600;          // 出發點／目的地多遠內的站牌
 const MIN_RIDE_M = 700;      // 坐太短不如走路
@@ -144,7 +147,7 @@ async function getNetwork() {
 // TDX 的路線站序（一天抓一次存到硬碟），只留規劃用得到的欄位
 const tdxRoutes = (source) => daily(`bus-${source}`, async () => {
   const path = source === INTERCITY ? 'v2/Bus/StopOfRoute/InterCity' : `v2/Bus/StopOfRoute/City/${source}`;
-  const list = await tdx(path, { $select: 'RouteUID,RouteName,SubRouteUID,SubRouteName,Direction,Stops' });
+  const list = await tdx(path, { $select: 'RouteUID,RouteName,SubRouteUID,SubRouteName,Direction,Stops' }, { timeout: DOWNLOAD_MS });
   return list.map((r) => ({
     route: r.RouteUID,
     sub: r.SubRouteUID,
@@ -158,6 +161,7 @@ const tdxRoutes = (source) => daily(`bus-${source}`, async () => {
 const tdxStopId = (route, dir, stop) => `${route}_${dir}_${stop}`;
 
 const tdxNetworks = new Map();
+const loading = new Set(); // 還在下載的資料
 
 function getTdxNetwork(source) {
   const hit = tdxNetworks.get(source);
@@ -181,7 +185,8 @@ function getTdxNetwork(source) {
     }
     return indexLines(lines);
   });
-  value.catch(() => tdxNetworks.delete(source)); // 失敗下次重抓
+  loading.add(source);
+  value.catch(() => tdxNetworks.delete(source)).finally(() => loading.delete(source)); // 失敗下次重抓
   tdxNetworks.set(source, { at: Date.now(), value });
   return value;
 }
@@ -197,11 +202,15 @@ function sourcesFor(points) {
   return intercity ? [...cities, INTERCITY] : cities;
 }
 
-// 取得所有用得到的路網；TDX 某個縣市失敗時略過，其他照樣能規劃
+// 最多等 ms，逾時先回傳 fallback（原本的工作繼續跑完並快取）
+const within = (promise, ms, fallback) =>
+  Promise.race([promise, new Promise((r) => setTimeout(() => r(fallback), ms))]);
+
+// 取得所有用得到的路網；TDX 某個縣市失敗或還在下載時先略過，其他照樣能規劃
 async function getNetworks(points) {
   const list = await Promise.all([
     getNetwork(),
-    ...sourcesFor(points).map((s) => getTdxNetwork(s).catch(() => null)),
+    ...sourcesFor(points).map((s) => within(getTdxNetwork(s).catch(() => null), LOAD_WAIT_MS, null)),
   ]);
   return list.filter(Boolean);
 }
@@ -242,7 +251,7 @@ function getTdxEta(source) {
 
 // 各份資料的站牌 id 不會重複，合併成一個查詢
 async function getEta(points) {
-  const maps = await Promise.all([getTaipeiEta(), ...sourcesFor(points).map(getTdxEta)]);
+  const maps = await Promise.all([getTaipeiEta(), ...sourcesFor(points).map((s) => within(getTdxEta(s), ETA_WAIT_MS, lastTdxEta.get(s) || new Map()))]);
   return { get: (id) => { for (const m of maps) if (m.has(id)) return m.get(id); } };
 }
 
@@ -429,6 +438,9 @@ export async function nearbyArrivals(point, limit = 15) {
     .sort((a, b) => (a.eta >= 0 ? a.eta : 1e9) - (b.eta >= 0 ? b.eta : 1e9) || a.distance - b.distance)
     .slice(0, limit);
 }
+
+// 這幾個點用到的公車資料是否還在下載（第一次查某個縣市時），讓畫面提示稍後再查
+export const stillLoading = (points) => sourcesFor(points).some((s) => loading.has(s));
 
 // 啟動時先載入，第一次查詢才不會等太久
 // 公路客運全台一份、第一次要抓約半分鐘，有金鑰就在背景先載入

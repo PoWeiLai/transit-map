@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import express from 'express';
 import { distance } from './geo.js';
-import { planBus, nearbyArrivals, warmUp } from './bus.js';
+import { planBus, nearbyArrivals, stillLoading, warmUp } from './bus.js';
 import { nearbyParking, warmUp as warmUpParking } from './scooter.js';
 import { planRail, railStations, warmUp as warmUpRail } from './rail.js';
 import { tdx, hasTdx, taipeiNow } from './tdx.js';
@@ -732,7 +732,7 @@ app.get('/api/bus', wrap(async (req, res) => {
   const to = parsePoint(req.query.to);
   if (!from || !to) return res.status(400).json({ error: '請提供出發點與目的地' });
   const [options, nearby] = await Promise.all([planBus(from, to, route), nearbyArrivals(from)]);
-  res.json({ from, to, options, nearby });
+  res.json({ from, to, options, nearby, loading: stillLoading([from, to]) });
 }));
 
 // 共享機車：（步行到取車位置）→ 騎到目的地附近有機車格的停車場 → 步行到目的地

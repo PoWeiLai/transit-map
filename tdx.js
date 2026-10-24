@@ -51,14 +51,15 @@ function throttled(fn) {
 }
 
 // path 例如 'v3/Rail/TRA/Station'，params 會自動加上 $format=JSON；
-// 進階服務（例如地址定位）用 'advanced/V3/Map/...'，參數是 format=JSON
-export async function tdx(path, params = {}) {
+// 進階服務（例如地址定位）用 'advanced/V3/Map/...'，參數是 format=JSON；
+// timeout：大份資料（例如全台公路客運約 18 MB）從國外主機下載要比較久
+export async function tdx(path, params = {}, { timeout = 60000 } = {}) {
   const url = path.startsWith(ADVANCED)
     ? `${API_ROOT}${path}?${new URLSearchParams({ format: 'JSON', ...params })}`
     : `${API_BASE}${path}?${new URLSearchParams({ $format: 'JSON', ...params })}`;
   for (let attempt = 0; ; attempt++) {
     const res = await throttled(async () =>
-      fetch(url, { headers: { Authorization: `Bearer ${await getToken()}` }, signal: AbortSignal.timeout(60000) }));
+      fetch(url, { headers: { Authorization: `Bearer ${await getToken()}` }, signal: AbortSignal.timeout(timeout) }));
     if (res.status === 429 && attempt < MAX_RETRY) {
       // 回應會告訴我們幾秒後額度恢復
       const reset = Math.min(Number(res.headers.get('ratelimit-reset')) || 10, MAX_RESET_WAIT_S);

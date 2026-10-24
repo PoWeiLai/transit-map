@@ -838,6 +838,7 @@
       if (!r.options.length) {
         stopNav();
         layer.clearLayers();
+        if (r.loading) return show(`<div class="card demo">這個縣市的公車資料第一次下載中（約半分鐘到一分鐘），請稍後再查一次</div>${nearbyHtml(r.nearby)}`);
         return show(`<div class="card err">附近 600 公尺內找不到可以到達的公車（最多轉乘一次；偏遠地區班次少，可能沒有資料）</div>
           ${nearbyHtml(r.nearby)}`);
       }
