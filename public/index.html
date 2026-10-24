@@ -150,12 +150,13 @@
         <p class="ex" data-for="from">例如：<button type="button">捷運科技大樓站</button><button type="button">台北車站</button><button type="button">板橋車站</button>・按 📍 用目前位置</p>
       </div>
       <div id="vehicleRow" hidden>
-        <label for="vehicle">取車位置（選填）：先在 GoShare／WeMo App 找到車，再填車子停的地址</label>
+        <label for="vehicle">取車位置（選填）：先在 GoShare／WeMo／iRent App 找到車，再填車子停的地址</label>
         <input id="vehicle" placeholder="車子停的地址，或點地圖 →「設為取車位置」" />
         <p class="ex" data-for="vehicle">例如：<button type="button">信義路五段7號</button><button type="button">忠孝東路四段1號</button>・不填就從出發點開始騎</p>
         <div class="links">找車：
           <a target="_blank" rel="noopener" href="https://www.ridegoshare.com/">🛵 開啟 GoShare</a>
           <a target="_blank" rel="noopener" href="https://www.wemoscooter.com/">🛵 開啟 WeMo</a>
+          <a target="_blank" rel="noopener" href="https://www.irentcar.com.tw/">🚙 開啟 iRent</a>
         </div>
       </div>
       <div id="whenRow" hidden>
@@ -232,7 +233,7 @@
     // ---------- 交通工具（可多選） ----------
     const TOOLS = {
       walk: '🚶 步行', bike: '🚲 YouBike', bus: '🚌 公車', metro: '🚇 捷運',
-      tra: '🚆 台鐵', thsr: '🚄 高鐵', scooter: '🛵 共享機車', uber: '🚗 Uber',
+      tra: '🚆 台鐵', thsr: '🚄 高鐵', car: '🚗 開車', moto: '🏍️ 騎機車', scooter: '🛵 共享機車', sharecar: '🚙 共享汽車', uber: '🚕 Uber',
     };
     const tools = new Set(['walk', 'bike', 'bus', 'metro']);
     try { // 記住上次開的工具（只存在這台裝置）
@@ -373,7 +374,7 @@
       show(bikeLayer, tools.has('bike'));
       if (tools.has('bike')) { if (!bikeInfo.getContainer()?.isConnected) bikeInfo.addTo(map); refreshBikes(); }
       else bikeInfo.remove();
-      $('vehicleRow').hidden = !tools.has('scooter');
+      $('vehicleRow').hidden = !tools.has('scooter') && !tools.has('sharecar');
       $('whenRow').hidden = !tools.has('tra') && !tools.has('thsr');
     }
     map.on('zoomend', applyTools);
@@ -480,16 +481,19 @@
         if ($('time').value || leg.depart != null) params.set('time', hm(leg.depart ?? 0));
         return api(`/api/rail?system=${mode}&${params}`);
       }
-      if (mode === 'scooter') {
-        // 填業者名稱是想找車，但車輛位置沒有公開資料，只能請使用者到 App 查
-        if (/goshare|gogoro|wemo|irent|威摩/i.test($('vehicle').value)) {
-          throw new Error('網站查不到共享機車的位置（業者沒有公開）。請在 GoShare／WeMo App 找到車後，把「車子停的地址」填在取車位置，或點地圖 →「設為取車位置」；不填也可以，會從出發點開始規劃。');
+      if (VEHICLE[mode]) {
+        params.set('kind', mode);
+        if (VEHICLE[mode].shared) {
+          // 填業者名稱是想找車，但車輛位置沒有公開資料，只能請使用者到 App 查
+          if (/goshare|gogoro|wemo|irent|威摩/i.test($('vehicle').value)) {
+            throw new Error('網站查不到共享車的位置（業者沒有公開）。請在 GoShare／WeMo／iRent App 找到車後，把「車子停的地址」填在取車位置，或點地圖 →「設為取車位置」；不填也可以，會從出發點開始規劃。');
+          }
+          // 取車位置只用在第一段
+          const vehicle = leg.index === 0 && $('vehicle').value.trim() ? await resolve('vehicle') : null;
+          if (vehicle) params.set('vehicle', `${vehicle.lat},${vehicle.lng}`);
         }
-        // 取車位置只用在第一段
-        const vehicle = leg.index === 0 && $('vehicle').value.trim() ? await resolve('vehicle') : null;
-        if (vehicle) params.set('vehicle', `${vehicle.lat},${vehicle.lng}`);
         set(['parking']);
-        return api('/api/scooter?' + params);
+        return api('/api/vehicle?' + params);
       }
       set(['pickup', 'dropoff']);
       if (/站/.test(from.name)) params.set('mrt', '1'); // 從捷運站出發 → 建議出口
@@ -575,7 +579,7 @@
               <span class="muted">・${TOOLS[l.mode]}${l.results[l.mode]?.duration != null ? ` 約 ${min(l.results[l.mode].duration)}` : ''}</span></div>
             <div class="modes">${Object.entries(l.results).map(([m, x]) => `
               <button type="button" data-leg="${i}" data-mode="${m}" class="${m === l.mode ? 'on' : ''}" ${x.duration == null ? 'disabled' : ''}
-                title="${esc(x.error || '')}">${TOOLS[m]} ${x.duration != null ? min(x.duration) : '不適用'}${m === 'uber' && x.r ? `・$${uberFare(x.r.total.distance, x.r.total.duration).low}起` : ''}</button>`).join('')}</div>
+                title="${esc(x.error || '')}">${TOOLS[m]} ${x.duration != null ? min(x.duration) : '不適用'}${m === 'uber' && x.r ? `・$${uberFare(x.r.total.distance, x.r.total.duration).low}起` : ''}${VEHICLE[m] && x.r?.cost ? `・$${x.r.cost[0].low}起` : ''}</button>`).join('')}</div>
           </div>`).join('')}
         ${legs.length > 1 ? '<p class="hint">點一段看詳細路線與導航；點工具可以換這段的交通方式。</p>' : ''}
       </div>`;
@@ -584,7 +588,8 @@
     const RENDER = {
       walk: (r, f, t) => renderWalk(r, f, t), bike: (r, f, t) => render(r, f, t), bus: (r, f, t) => renderBus(r, f, t),
       metro: (r, f, t) => renderMetro(r, f, t), tra: (r, f, t) => renderRail(r, f, t), thsr: (r, f, t) => renderRail(r, f, t),
-      scooter: (r, f, t) => renderScooter(r, f, t), uber: (r, f, t) => renderDrive(r, f, t),
+      car: (r, f, t) => renderVehicle(r, f, t), moto: (r, f, t) => renderVehicle(r, f, t),
+      scooter: (r, f, t) => renderVehicle(r, f, t), sharecar: (r, f, t) => renderVehicle(r, f, t), uber: (r, f, t) => renderDrive(r, f, t),
     };
 
     function showLeg(i) {
@@ -693,7 +698,7 @@
     }
     const uberA = (from, to, text) => `<a class="uber" target="_blank" rel="noopener" href="${esc(uberLink(from, to))}">${text}</a>`;
 
-    const GMODE = { foot: 'walking', bike: 'bicycling', bus: 'transit', train: 'transit', metro: 'transit', scooter: 'driving', taxi: 'driving' };
+    const GMODE = { foot: 'walking', bike: 'bicycling', bus: 'transit', train: 'transit', metro: 'transit', scooter: 'driving', car: 'driving', taxi: 'driving' };
     const TRANSIT = new Set(['bus', 'train', 'metro']); // 坐車的段：步驟是沿途各站
     function gmaps(from, to, mode) {
       return 'https://www.google.com/maps/dir/?api=1&' + new URLSearchParams({
@@ -846,6 +851,7 @@
       bike: { color: '#f5a000', weight: 6 },
       bus: { color: '#16a34a', weight: 6 },
       scooter: { color: '#7c3aed', weight: 6 },
+      car: { color: '#be123c', weight: 6 },
       train: { color: '#0f766e', weight: 6 },
       metro: { color: '#0284c7', weight: 6 },
       taxi: { color: '#ca8a04', weight: 5 },
@@ -1250,46 +1256,65 @@
       </div>`;
     }
 
-    // ---------- 共享機車 ----------
-    function renderScooter(p, from, to) {
+    // ---------- 汽車、機車（自己的車、共享機車、共享汽車） ----------
+    // icon：地圖與導航用；space：停車場顯示哪種車位；shared：要先走到取車位置
+    const VEHICLE = {
+      car: { icon: '🚗', verb: '開車', space: '汽車', shared: false },
+      moto: { icon: '🏍️', verb: '騎車', space: '機車', shared: false },
+      scooter: { icon: '🛵', verb: '騎車', space: '機車', shared: true, app: 'App', apps: 'GoShare／WeMo／iRent' },
+      sharecar: { icon: '🚙', verb: '開車', space: '汽車', shared: true, app: 'App', apps: 'iRent' },
+    };
+    const COST_TITLE = { car: '油錢（估計）', moto: '油錢（估計）', scooter: '共享機車費用（估計）', sharecar: '共享汽車費用（估計）' };
+    const COST_NOTE = {
+      car: '以每公升約 30 元、每公升跑 12 公里估算，不含停車費、過路費。',
+      moto: '以每公升約 30 元、每公升跑 30 公里估算，不含停車費。',
+      scooter: '依各家公開的起步價（前 6 分鐘）＋每分鐘費率估算，高的那個數字是塞車多花 3 成時間；不含方案優惠，實際以 App 為準。',
+      sharecar: '依 iRent 時租（平日約 130、假日約 205 元／小時，至少 1 小時）＋每公里約 3.1 元估算，不含過路費、停車費，實際以 App 為準。',
+    };
+
+    function renderVehicle(p, from, to) {
       stopNav();
       layer.clearLayers();
+      const v = VEHICLE[p.kind];
       const legs = [...p.legs];
       const walk1 = p.vehicle ? legs.shift() : null;
       const [ride, walk2] = legs;
       const start = p.vehicle ? { ...p.vehicle, name: '取車位置' } : from;
       const pk = p.parking;
+      const end = pk || to;
 
       const stages = [
         walk1 && { leg: walk1, from, to: start, icon: '🚶', title: '步行到取車位置',
-          arrive: '已到達取車位置，請用 App 掃碼解鎖 🛵' },
-        { leg: ride, from: start, to: pk, icon: '🛵', title: `騎到停車場：${pk.name}`,
-          arrive: `已到達「${pk.name}」，請停入機車格後在 App 還車` },
-        { leg: walk2, from: pk, to, icon: '🚶', title: `步行到目的地：${to.name}`, arrive: '🎉 已抵達目的地' },
+          arrive: `已到達取車位置，請用 App 解鎖 ${v.icon}` },
+        { leg: ride, from: start, to: end, icon: v.icon, title: pk ? `${v.verb}到停車場：${pk.name}` : `${v.verb}到目的地：${to.name}`,
+          arrive: pk ? `已到達「${pk.name}」${v.shared ? `，請停好車後在 App 還車` : '，請停車'}` : '🎉 已抵達目的地' },
+        walk2 && { leg: walk2, from: pk, to, icon: '🚶', title: `步行到目的地：${to.name}`, arrive: '🎉 已抵達目的地' },
       ].filter(Boolean);
       current = { stages, from, to };
 
       drawLegs(p.legs, from, to);
       if (p.vehicle) L.marker([p.vehicle.lat, p.vehicle.lng], { icon: pin('#7c3aed', '車') }).bindPopup('取車位置').addTo(layer);
+      const spaces = (s) => (s.available != null
+        ? `${v.space}空位 <b class="${cls(s.available)}">${s.available}</b>${s.total ? `／${s.total}` : ''}`
+        : s.total ? `<span class="muted">${v.space}位 ${s.total} 格</span>` : '<span class="muted">無即時車位</span>');
       for (const s of p.parkings) {
-        L.marker([s.lat, s.lng], { icon: pin(s.id === pk.id ? '#7c3aed' : '#c4b5fd', 'P') })
-          .bindPopup(`<b>${esc(s.name)}</b><br>${esc(s.address)}<br>機車格 ${s.totalMotor}${s.available != null ? `・空位 ${s.available}` : ''}<br>${esc(s.fee)}`)
+        L.marker([s.lat, s.lng], { icon: pin(s.id === pk?.id ? '#7c3aed' : '#c4b5fd', 'P') })
+          .bindPopup(`<b>${esc(s.name)}</b><br>${esc(s.address)}<br>${spaces(s)}<br>${esc(s.fee)}`)
           .addTo(layer);
       }
       map.fitBounds(L.featureGroup(layer.getLayers()).getBounds(), { padding: [30, 30] });
 
-      const spaces = (s) => (s.available != null
-        ? `空位 <b class="${cls(s.available)}">${s.available}</b>`
-        : `<span class="muted">共 ${s.totalMotor} 格</span>`);
       const detail = (st) => (st.leg === walk1 ? '步行到取車位置<br>'
-        : st.leg === ride ? `騎到 <b>${esc(pk.name)}</b>（${spaces(pk)}）<br>`
+        : st.leg === ride ? (pk ? `${v.verb}到 <b>${esc(pk.name)}</b>（${spaces(pk)}）<br>` : `${v.verb}到 <b>${esc(to.name)}</b><br>`)
         : `從停車場步行到 <b>${esc(to.name)}</b><br>`);
       const est = p.legs.some((l) => l.estimated) ? '<p class="hint">※ 部分路線服務無回應，為直線距離估算</p>' : '';
+      const cost = p.cost.map((c) => `<div>${esc(c.name)}：<b>$${c.low}${c.high !== c.low ? `～$${c.high}` : ''}</b></div>`).join('');
 
       show(`
-        ${p.vehicle ? '' : `<div class="card demo">車輛位置請在 App 查看（業者沒有公開車輛資料）。找到車後把位置填在「取車位置」，就能帶你走過去。
-          <div class="links"><a target="_blank" rel="noopener" href="https://www.ridegoshare.com/">🛵 開啟 GoShare</a>
-          <a target="_blank" rel="noopener" href="https://www.wemoscooter.com/">🛵 開啟 WeMo</a></div></div>`}
+        ${v.shared && !p.vehicle ? `<div class="card demo">車輛位置請在 ${v.apps} App 查看（業者沒有公開車輛資料）。找到車後把位置填在「取車位置」，就能帶你走過去。
+          <div class="links">${p.kind === 'scooter' ? `<a target="_blank" rel="noopener" href="https://www.ridegoshare.com/">🛵 開啟 GoShare</a>
+          <a target="_blank" rel="noopener" href="https://www.wemoscooter.com/">🛵 開啟 WeMo</a>` : ''}
+          <a target="_blank" rel="noopener" href="https://www.irentcar.com.tw/">🚙 開啟 iRent</a></div></div>` : ''}
         <div class="card">
           <div class="muted">全程約</div>
           <div class="big">${min(p.total.duration)}・${km(p.total.distance)}</div>
@@ -1297,14 +1322,16 @@
           ${est}
           ${navButtons}
         </div>
-        <div class="card"><h2>🅿️ 目的地附近可停機車的停車場</h2>
+        <div class="card"><h2>💰 ${COST_TITLE[p.kind]}：${km(ride.distance)}・約 ${min(ride.duration)}</h2>${cost}
+          <p class="hint">${COST_NOTE[p.kind]}</p></div>
+        ${p.parkings.length ? `<div class="card"><h2>🅿️ 目的地附近可停${v.space}的停車場</h2>
           ${p.parkings.map((s) => `
-            <div class="alt ${s.id === pk.id ? 'sel' : ''}" data-type="parking" data-id="${esc(s.id)}">
-              <span>${esc(s.name)}<br><span class="muted">距目的地 ${km(s.distance)}・${esc(s.hours)}<br>${esc(s.fee)}</span></span>
+            <div class="alt ${s.id === pk?.id ? 'sel' : ''}" data-type="parking" data-id="${esc(s.id)}">
+              <span>${esc(s.name)}<br><span class="muted">距目的地 ${km(s.distance)}<br>${esc(s.fee)}</span></span>
               <span style="white-space:nowrap">${spaces(s)}</span>
             </div>`).join('')}
-        </div>
-        <p class="hint">點選其他停車場可改停該處重新規劃。共享機車請確認停車場在業者的服務範圍內、可否在該處還車；停車費依現場公告。空位資料時間：${esc(p.availabilityUpdated)}</p>
+          <p class="hint">點選其他停車場可改停該處重新規劃。${v.shared ? '共享車請確認停車場在業者的服務範圍內、可否在該處還車；' : ''}停車費依現場公告。${p.availabilityUpdated ? `空位資料時間：${esc(p.availabilityUpdated.replace('T', ' ').slice(0, 16))}` : ''}</p>
+        </div>` : `<div class="card muted">目的地附近 1.5 公里內查不到有${v.space}位資料的停車場（部分縣市沒有公開即時車位），已直接規劃到目的地，請留意路邊停車格。</div>`}
       `);
     }
 
@@ -1624,7 +1651,7 @@
       const label = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
       const box = document.createElement('div');
       box.innerHTML = '<button data-k="from">設為出發點</button> <button data-k="stop">加入要去的地方</button>' +
-        (tools.has('scooter') ? ' <button data-k="vehicle">設為取車位置</button>' : '') +
+        (tools.has('scooter') || tools.has('sharecar') ? ' <button data-k="vehicle">設為取車位置</button>' : '') +
         // 已設出發點：Uber 直接帶入「出發點 → 這裡」
         `<br>${points.from
           ? uberA(points.from, { lat, lng, name: '地圖選點' }, `🚗 Uber：${esc(points.from.name)} → 這裡`)

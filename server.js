@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs';
 import express from 'express';
 import { distance } from './geo.js';
 import { planBus, nearbyArrivals, stillLoading, warmUp } from './bus.js';
-import { nearbyParking, warmUp as warmUpParking } from './scooter.js';
+import { warmUp as warmUpParking } from './scooter.js';
+import { nearbyLots, costOf } from './vehicle.js';
 import { planRail, railStations, warmUp as warmUpRail } from './rail.js';
 import { tdx, hasTdx, taipeiNow } from './tdx.js';
 import { planMetro, metroMap } from './metro.js';
@@ -22,15 +23,16 @@ const ROUTE_URL = {
   foot: 'https://routing.openstreetmap.de/routed-foot/route/v1/driving',
   bike: 'https://routing.openstreetmap.de/routed-bike/route/v1/driving',
   scooter: 'https://routing.openstreetmap.de/routed-car/route/v1/driving',
+  car: 'https://routing.openstreetmap.de/routed-car/route/v1/driving',
 };
-const VALHALLA_COSTING = { foot: 'pedestrian', bike: 'bicycle', scooter: 'motor_scooter' };
+const VALHALLA_COSTING = { foot: 'pedestrian', bike: 'bicycle', scooter: 'motor_scooter', car: 'auto' };
 // 捷運出發時，在出發點多遠內找出口
 const EXIT_RADIUS_M = 400;
 // 公開服務要求標明是哪個程式在呼叫
 const USER_AGENT = 'transit-map/1.0 (+https://github.com/PoWeiLai/transit-map)';
 const STATION_CACHE_MS = 60 * 1000;
 // 路線服務失敗時用直線距離估算
-const FALLBACK_SPEED = { foot: 4.5 / 3.6, bike: 12 / 3.6, scooter: 25 / 3.6, taxi: 30 / 3.6 }; // m/s
+const FALLBACK_SPEED = { foot: 4.5 / 3.6, bike: 12 / 3.6, scooter: 25 / 3.6, car: 30 / 3.6, taxi: 30 / 3.6 }; // m/s
 const CANDIDATES = 3;
 
 // ---------- 站點資料 ----------
@@ -770,27 +772,37 @@ app.get('/api/bus', wrap(async (req, res) => {
   res.json({ from, to, options, nearby, loading: stillLoading([from, to]) });
 }));
 
-// 共享機車：（步行到取車位置）→ 騎到目的地附近有機車格的停車場 → 步行到目的地
-app.get('/api/scooter', wrap(async (req, res) => {
+// 汽車、機車：kind = car（自己開車）／moto（自己騎車）／scooter（共享機車）／sharecar（共享汽車）。
+// （共享車先步行到取車位置）→ 開／騎到目的地附近有車位的停車場 → 步行到目的地；附近沒有停車場就直接到目的地
+const VEHICLES = {
+  car: { route: 'car', space: 'car', shared: false },
+  moto: { route: 'scooter', space: 'moto', shared: false },
+  scooter: { route: 'scooter', space: 'moto', shared: true },
+  sharecar: { route: 'car', space: 'car', shared: true },
+};
+app.get('/api/vehicle', wrap(async (req, res) => {
   const from = parsePoint(req.query.from);
   const to = parsePoint(req.query.to);
   if (!from || !to) return res.status(400).json({ error: '請提供出發點與目的地' });
-  const vehicle = parsePoint(req.query.vehicle); // 使用者在 App 看到的車輛位置，可不填
+  const kind = VEHICLES[req.query.kind] ? req.query.kind : 'scooter';
+  const v = VEHICLES[kind];
+  // 共享車：使用者在 App 看到的車輛位置，可不填
+  const vehicle = v.shared ? parsePoint(req.query.vehicle) : null;
 
-  const { list: parkings, updated } = await nearbyParking(to);
-  if (!parkings.length) {
-    return res.status(404).json({ error: '目的地附近 1.5 公里內找不到有機車格的停車場（目前只支援台北市）' });
-  }
-  const parking = parkings.find((p) => p.id === req.query.parking) || parkings[0];
+  const { list: parkings, updated } = await nearbyLots(to, v.space);
+  const parking = parkings.find((p) => p.id === req.query.parking) || parkings[0] || null;
   const start = vehicle || from;
+  const end = parking || to;
 
   const legs = await Promise.all([
     vehicle ? route('foot', from, vehicle) : null,
-    route('scooter', start, parking),
-    route('foot', parking, to),
+    route(v.route, start, end),
+    parking ? route('foot', parking, to) : null,
   ]);
+  const ride = legs[1];
   const steps = legs.filter(Boolean);
   res.json({
+    kind,
     from,
     to,
     vehicle,
@@ -798,6 +810,7 @@ app.get('/api/scooter', wrap(async (req, res) => {
     parkings,
     availabilityUpdated: updated,
     legs: steps,
+    cost: costOf(kind, ride.distance, ride.duration),
     total: {
       distance: steps.reduce((n, l) => n + l.distance, 0),
       duration: steps.reduce((n, l) => n + l.duration, 0),
