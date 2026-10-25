@@ -112,7 +112,9 @@
     .pin { border-radius:50%; border:2px solid #fff; box-shadow:0 0 3px rgba(0,0,0,.5);
            color:#fff; font:700 11px/20px system-ui; text-align:center; }
     #formToggle, .mapsize { display:none; }
-    .mapsize a { font-size:18px; font-weight:700; }
+    .mapsize a { font-size:16px; font-weight:700; }
+    .traffic a { font-size:16px; }
+    .traffic a.on { background:#fde68a; }
     @media (max-width: 760px) {
       body { grid-template-columns: 1fr; grid-template-rows: auto 45vh; }
       aside { border-right:0; order:1; }
@@ -122,6 +124,8 @@
       body.form-hidden form { display:none; }
       body.map-big { grid-template-rows: auto 75vh; }
       body.map-big #map { height:75vh; }
+      body.map-small { grid-template-rows: auto 25vh; }
+      body.map-small #map { height:25vh; }
       .mapsize { display:block; }
     }
   </style>
@@ -209,22 +213,65 @@
       $('formToggle').textContent = hidden ? '▼ 展開出發點、目的地' : '▲ 收起出發點、目的地';
     }
     $('formToggle').addEventListener('click', () => setFormHidden(!document.body.classList.contains('form-hidden')));
-    const mapSize = L.control({ position: 'topleft' });
-    mapSize.onAdd = () => {
+    // 地圖高度：小（25%）、中（45%，預設）、大（75%）
+    const MAP_SIZES = ['map-small', '', 'map-big'];
+    let mapSize = 1;
+    function setMapSize(i) {
+      mapSize = Math.max(0, Math.min(MAP_SIZES.length - 1, i));
+      document.body.classList.remove('map-small', 'map-big');
+      if (MAP_SIZES[mapSize]) document.body.classList.add(MAP_SIZES[mapSize]);
+      setTimeout(() => map.invalidateSize(), 50); // 地圖大小變了要重新排圖磚
+    }
+    const sizeCtl = L.control({ position: 'topleft' });
+    sizeCtl.onAdd = () => {
       const box = L.DomUtil.create('div', 'leaflet-bar mapsize');
-      box.innerHTML = '<a href="#" role="button" title="放大地圖">⤢</a>';
-      const a = box.firstChild;
-      L.DomEvent.on(a, 'click', (e) => {
-        L.DomEvent.preventDefault(e);
-        const big = document.body.classList.toggle('map-big');
-        a.textContent = big ? '⤡' : '⤢';
-        a.title = big ? '縮小地圖' : '放大地圖';
-        setTimeout(() => map.invalidateSize(), 50); // 地圖大小變了要重新排圖磚
-      });
+      box.innerHTML = '<a href="#" role="button" title="地圖變大" data-d="1">⤢</a><a href="#" role="button" title="地圖變小" data-d="-1">⤡</a>';
+      for (const a of box.children) {
+        L.DomEvent.on(a, 'click', (e) => { L.DomEvent.preventDefault(e); setMapSize(mapSize + Number(a.dataset.d)); });
+      }
       L.DomEvent.disableClickPropagation(box);
       return box;
     };
-    mapSize.addTo(map);
+    sizeCtl.addTo(map);
+
+    // ---------- 即時路況：地圖上標出車多（橘）、壅塞（紅）的路段 ----------
+    const trafficLayer = L.layerGroup().addTo(map);
+    const TRAFFIC_COLOR = { slow: '#f59e0b', jam: '#dc2626' };
+    let trafficOn = false, trafficTimer = null, trafficSeq = 0;
+    async function loadTraffic() {
+      if (!trafficOn) return;
+      const b = map.getBounds();
+      const seq = ++trafficSeq;
+      try {
+        const r = await api(`/api/traffic?bbox=${[b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].map((x) => x.toFixed(4)).join(',')}`);
+        if (seq !== trafficSeq || !trafficOn) return; // 地圖又移動了，以新的為準
+        trafficLayer.clearLayers();
+        for (const sec of r.sections) {
+          for (const line of sec.lines) {
+            L.polyline(line, { color: TRAFFIC_COLOR[sec.level], weight: 5, opacity: 0.85 })
+              .bindPopup(`${sec.level === 'jam' ? '🔴 壅塞' : '🟠 車多'}・平均時速約 ${sec.speed} 公里`).addTo(trafficLayer);
+          }
+        }
+      } catch { /* 路況只是參考，抓不到就算了 */ }
+    }
+    function setTraffic(on) {
+      trafficOn = on;
+      document.querySelector('.traffic a')?.classList.toggle('on', on);
+      clearInterval(trafficTimer);
+      trafficLayer.clearLayers();
+      if (on) { loadTraffic(); trafficTimer = setInterval(loadTraffic, 3 * 60 * 1000); }
+    }
+    let trafficMove = null;
+    map.on('moveend', () => { clearTimeout(trafficMove); trafficMove = setTimeout(loadTraffic, 600); });
+    const trafficCtl = L.control({ position: 'topleft' });
+    trafficCtl.onAdd = () => {
+      const box = L.DomUtil.create('div', 'leaflet-bar traffic');
+      box.innerHTML = '<a href="#" role="button" title="即時路況（橘：車多、紅：壅塞）">🚦</a>';
+      L.DomEvent.on(box.firstChild, 'click', (e) => { L.DomEvent.preventDefault(e); setTraffic(!trafficOn); });
+      L.DomEvent.disableClickPropagation(box);
+      return box;
+    };
+    trafficCtl.addTo(map);
 
     // 已確認的座標；使用者改了文字就清掉，重新查詢
     const points = { from: null, vehicle: null };
@@ -1279,6 +1326,7 @@
     function renderVehicle(p, from, to) {
       stopNav();
       layer.clearLayers();
+      if (!trafficOn) setTraffic(true); // 開車、騎車時順便看路況
       const v = VEHICLE[p.kind];
       const legs = [...p.legs];
       const walk1 = p.vehicle ? legs.shift() : null;

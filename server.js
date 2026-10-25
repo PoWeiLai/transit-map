@@ -5,6 +5,7 @@ import { planBus, nearbyArrivals, stillLoading, warmUp } from './bus.js';
 import { warmUp as warmUpParking } from './scooter.js';
 import { nearbyLots, costOf } from './vehicle.js';
 import { camerasAlong, warmUp as warmUpCameras } from './cameras.js';
+import { trafficIn } from './traffic.js';
 import { planRail, railStations, warmUp as warmUpRail } from './rail.js';
 import { tdx, hasTdx, taipeiNow } from './tdx.js';
 import { planMetro, metroMap } from './metro.js';
@@ -658,6 +659,15 @@ app.get('/api/drive', wrap(async (req, res) => {
   if (!from || !to) return res.status(400).json({ error: '請提供出發點與目的地' });
   const leg = { ...(await route('scooter', from, to)), mode: 'taxi' };
   res.json({ legs: [leg], total: { distance: leg.distance, duration: leg.duration } });
+}));
+
+// 地圖範圍內車多、壅塞的路段（bbox = 南,西,北,東）
+const MAX_TRAFFIC_DEG = 3; // 範圍太大（地圖縮太小）就不回傳
+app.get('/api/traffic', wrap(async (req, res) => {
+  const [s, w, n, e] = String(req.query.bbox || '').split(',').map(Number);
+  if (![s, w, n, e].every(Number.isFinite)) return res.status(400).json({ error: '請提供地圖範圍' });
+  if (n - s > MAX_TRAFFIC_DEG || e - w > MAX_TRAFFIC_DEG) return res.json({ sections: [], updated: '', tooBig: true });
+  res.json(await trafficIn([s, n, w, e]));
 }));
 
 // 地圖範圍內的 YouBike 站點與統計（bbox = 南,西,北,東），讓使用者看哪裡有車
