@@ -779,8 +779,12 @@ app.get('/api/bus', wrap(async (req, res) => {
   const from = parsePoint(req.query.from);
   const to = parsePoint(req.query.to);
   if (!from || !to) return res.status(400).json({ error: '請提供出發點與目的地' });
-  const [options, nearby] = await Promise.all([planBus(from, to, route), nearbyArrivals(from)]);
-  res.json({ from, to, options, nearby, loading: stillLoading([from, to]) });
+  // 有指定日期、時間（例如明天搭客運）就依那時候的時刻表規劃；一小時內才用即時到站
+  const when = parseWhen(req.query.date, req.query.time);
+  if (when.error) return res.status(400).json({ error: when.error });
+  const live = isSoon(when);
+  const [options, nearby] = await Promise.all([planBus(from, to, route, live, when), live ? nearbyArrivals(from) : []]);
+  res.json({ from, to, options, nearby, live, when, loading: stillLoading([from, to]) });
 }));
 
 // 汽車、機車：kind = car（自己開車）／moto（自己騎車）／scooter（共享機車）／sharecar（共享汽車）。
@@ -857,7 +861,9 @@ app.get('/api/metro/map', (req, res) => res.json(metroMap()));
 const MAX_DAYS_AHEAD = 30;
 function parseWhen(date, time) {
   const now = taipeiNow();
-  if (!date) return now;
+  if (!date && !time) return now;
+  date ||= now.date; // 只填時間就是今天
+
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { error: '日期格式不正確' };
   const days = (Date.parse(date) - Date.parse(now.date)) / 86400000;
   if (!(days >= 0 && days <= MAX_DAYS_AHEAD)) return { error: `只能查今天起 ${MAX_DAYS_AHEAD} 天內的班次` };

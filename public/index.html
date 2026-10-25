@@ -426,7 +426,7 @@
       if (tools.has('bike')) { if (!bikeInfo.getContainer()?.isConnected) bikeInfo.addTo(map); refreshBikes(); }
       else bikeInfo.remove();
       $('vehicleRow').hidden = !tools.has('scooter') && !tools.has('sharecar');
-      $('whenRow').hidden = !tools.has('tra') && !tools.has('thsr');
+      $('whenRow').hidden = !tools.has('tra') && !tools.has('thsr') && !tools.has('bus');
     }
     map.on('zoomend', applyTools);
 
@@ -525,7 +525,12 @@
       const set = (keys) => keys.forEach((k) => choices[k] && params.set(k, choices[k]));
       if (mode === 'walk') return api('/api/walk?' + params);
       if (mode === 'uber') return api('/api/drive?' + params);
-      if (mode === 'bus') return api('/api/bus?' + params);
+      if (mode === 'bus') {
+        // 客運常常是明後天才搭：有指定日期、時間就依那時的時刻表；第二段之後接在前面各段之後
+        if ($('date').value) params.set('date', $('date').value);
+        if ($('time').value || leg.depart != null) params.set('time', hm(leg.depart ?? 0));
+        return api('/api/bus?' + params);
+      }
       if (['tra', 'thsr', 'metro'].includes(mode)) {
         // 到車站／出站後只用有開啟的工具；沒開步行時只有很近才走路。access／egress 是使用者在這段指定的方式
         params.set('allow', [tools.has('walk') && 'walk', tools.has('bike') && 'youbike', tools.has('bus') && 'bus', tools.has('metro') && 'metro', tools.has('uber') && 'uber'].filter(Boolean).join(','));
@@ -1023,7 +1028,12 @@
       };
 
       const est = o.legs.some((l) => l.estimated) ? '<p class="hint">※ 部分步行路線服務無回應，為直線距離估算</p>' : '';
+      // 不是現在搭：依時刻表規劃，市區公車沒有時刻表只能估計
+      const later = r.live === false
+        ? `<div class="card demo">依 ${esc(r.when.date)} ${hhmm(r.when.minutes)} 出發規劃：客運看時刻表的發車時間；市區公車沒有時刻表，等車時間為估計值，出發前請再查一次即時到站。</div>`
+        : '';
       show(`
+        ${later}
         ${r.options.map((opt, i) => `
           <div class="card opt ${i === idx ? 'sel' : ''}" data-opt="${i}">
             <div class="chips">${chips(opt)}</div>

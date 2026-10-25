@@ -433,7 +433,9 @@ function makeWaiter(eta, clock) {
     const e = eta.get(line.stops[i].id);
     if (e != null && (NO_SERVICE.has(e) || e >= elapsed)) return { wait: waitFor(e, elapsed), text: null };
     const s = clock && scheduledWait(line, i, clock, elapsed);
-    return s || { wait: waitFor(e, elapsed), text: null };
+    // 少數客運路線 TDX 沒有時刻表，又沒有即時到站，只能請使用者看業者網站
+    const unknown = line.source === INTERCITY && e == null ? '沒有時刻表資料，請看業者官網' : null;
+    return s || { wait: waitFor(e, elapsed), text: unknown };
   };
   waitAt.clock = clock;
   return waitAt;
