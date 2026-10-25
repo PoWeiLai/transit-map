@@ -3,6 +3,7 @@ import { gunzipSync } from 'node:zlib';
 import { distance } from './geo.js';
 import { tdx, hasTdx, daily, cached, taipeiNow, toMinutes } from './tdx.js';
 import { citiesAt, inBox } from './cities.js';
+import { addCoachInfo } from './coach.js';
 
 const BASE = 'https://tcgbusfs.blob.core.windows.net/';
 const SOURCES = ['blobbus', 'ntpcbus']; // 台北市、新北市
@@ -169,7 +170,8 @@ function getTdxNetwork(source) {
         source,
         route: r.route,
         name: source === INTERCITY ? `客運 ${r.name}` : r.name, // 畫面上看得出是客運
-
+        sub: r.sub,
+        dir: r.dir,
         headsign: `往${stops.at(-1).name}`,
         speed: source === INTERCITY ? INTERCITY_SPEED : BUS_SPEED,
         stops,
@@ -427,12 +429,24 @@ function clockOf(live, at) {
 // 等車時間：趕得上的即時到站優先；客運沒有即時資料、尚未發車或趕不上這班時看時刻表；都沒有就照原本估算。
 // text：用時刻表算的才有，畫面顯示預定發車時間
 function makeWaiter(eta, clock) {
-  return (line, i, elapsed) => {
+  const waitAt = (line, i, elapsed) => {
     const e = eta.get(line.stops[i].id);
     if (e != null && (NO_SERVICE.has(e) || e >= elapsed)) return { wait: waitFor(e, elapsed), text: null };
     const s = clock && scheduledWait(line, i, clock, elapsed);
     return s || { wait: waitFor(e, elapsed), text: null };
   };
+  waitAt.clock = clock;
+  return waitAt;
+}
+
+// elapsed 秒後到第 i 站，時刻表上接下來的 n 班（HH:MM），讓使用者知道錯過這班還有哪班
+function upcoming(line, i, clock, elapsed, n = 3) {
+  const timing = clock && timingOf(line);
+  if (!timing) return [];
+  const reach = clock.sec + elapsed;
+  const today = departures(timing, i, clock.day);
+  const yesterday = departures(timing, i, (clock.day + 6) % 7).filter((t) => t >= DAY_S).map((t) => t - DAY_S);
+  return [...yesterday, ...today].filter((t) => t >= reach).sort((a, b) => a - b).slice(0, n).map(hhmm);
 }
 
 // -1 尚未發車、-2 交管不停靠、-3 末班車已過、-4 今日未營運
@@ -549,7 +563,10 @@ export async function planBus(from, to, route, live = true, at = null) {
   // 用實際步行路線算出的總時間重新排序
   const built = await Promise.all(top.map((o) => buildOption(o, from, to, eta, waitAt, route)));
   // 實際步行比估計久、趕不上末班車的方案拿掉
-  return built.filter((o) => Number.isFinite(o.total.duration)).sort((a, b) => a.total.duration - b.total.duration);
+  const ok = built.filter((o) => Number.isFinite(o.total.duration)).sort((a, b) => a.total.duration - b.total.duration);
+  // 客運附上票價、業者、路線圖；查不到就算了，規劃照樣回傳
+  await addCoachInfo(ok.flatMap((o) => o.legs.filter((l) => l.coach))).catch(() => {});
+  return ok;
 }
 
 function busLeg(r, eta) {
@@ -564,6 +581,7 @@ function busLeg(r, eta) {
     stopCount: stops.length - 1,
     distance: Math.round(stops.at(-1).along - stops[0].along),
     duration: Math.round(rideTime(r.line, r.i, r.j)),
+    coach: r.line.source === INTERCITY ? { route: r.line.route, sub: r.line.sub, dir: r.line.dir } : undefined,
     path: stops.map((s) => [s.lat, s.lng]),
     // 坐車時的「步驟」就是沿途每一站，導航時用來提示還有幾站
     steps: stops.map((s, k) => ({
@@ -599,6 +617,7 @@ async function buildOption(o, from, to, eta, waitAt, route) {
   const waitOf = (k, elapsed) => {
     const w = waitAt(o.rides[k].line, o.rides[k].i, elapsed);
     if (w.text) buses[k].etaText = w.text;
+    if (buses[k].coach) buses[k].coach.next = upcoming(o.rides[k].line, o.rides[k].i, waitAt.clock, elapsed);
     return w.wait;
   };
   let t = w0.duration;

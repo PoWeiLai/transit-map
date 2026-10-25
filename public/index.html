@@ -939,6 +939,21 @@
     let busResult = null; // 最近一次公車規劃結果，切換方案時不用重查
 
     const etaHtml = (b) => `<span class="${b.eta != null && b.eta >= 0 && b.eta < 180 ? 'eta-now' : 'muted'}">${esc(b.etaText)}</span>`;
+    // 客運：接下來班次、票價、業者電話與官網、路線圖，不用再到客運網站查
+    const webLink = (url, text) => (/^https?:\/\//.test(url) ? ` <a href="${esc(url)}" target="_blank" rel="noopener">${text}</a>` : '');
+    function coachHtml(l) {
+      const c = l.coach;
+      if (!c) return '';
+      const nt = ([a, b]) => (a === b ? `NT$${a}` : `NT$${a}～${b}`);
+      const op = c.operator;
+      const lines = [
+        c.next?.length && `接下來班次：${c.next.map(esc).join('、')}`,
+        c.fare && `票價：全票 ${nt(c.fare.full)}${c.fare.half ? `・半票 ${nt(c.fare.half)}` : ''}`,
+        op && `${esc(op.name)}${op.phone ? ` <a href="tel:${esc(op.phone)}">${esc(op.phone)}</a>` : ''}${webLink(op.url, '官網')}`,
+        webLink(c.map, '路線圖').trim(),
+      ].filter(Boolean);
+      return lines.length ? `<span class="muted">${lines.join('<br>')}</span><br>` : '';
+    }
 
     function renderBus(r, from, to) {
       busResult = { r, from, to };
@@ -1002,7 +1017,7 @@
         const l = st.leg;
         if (l.mode === 'bus') {
           return `搭 <span class="chip">${esc(l.route)}</span> ${esc(l.headsign)}<br>
-            「${esc(l.board.name)}」上車 → 「${esc(l.alight.name)}」下車<br>${etaHtml(l)}<br>`;
+            「${esc(l.board.name)}」上車 → 「${esc(l.alight.name)}」下車<br>${etaHtml(l)}<br>${coachHtml(l)}`;
         }
         return `${esc(st.title)}<br>`;
       };
@@ -1075,7 +1090,7 @@
         }
         if (l.mode === 'bus') {
           return `搭 <span class="chip">${esc(l.route)}</span> ${esc(l.headsign)}<br>
-            「${esc(l.board.name)}」上車 → 「${esc(l.alight.name)}」下車<br>${st.inbound ? etaHtml(l) + '<br>' : ''}`;
+            「${esc(l.board.name)}」上車 → 「${esc(l.alight.name)}」下車<br>${st.inbound ? etaHtml(l) + '<br>' : ''}${coachHtml(l)}`;
         }
         return `${esc(st.title)}<br>`;
       };
@@ -1162,7 +1177,7 @@
         }
         if (l.mode === 'bus') {
           return `搭 <span class="chip">${esc(l.route)}</span> ${esc(l.headsign)}<br>
-            「${esc(l.board.name)}」上車 → 「${esc(l.alight.name)}」下車<br>${st.inbound ? etaHtml(l) + '<br>' : ''}`;
+            「${esc(l.board.name)}」上車 → 「${esc(l.alight.name)}」下車<br>${st.inbound ? etaHtml(l) + '<br>' : ''}${coachHtml(l)}`;
         }
         return `${esc(st.title)}<br>`;
       };
