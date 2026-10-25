@@ -554,7 +554,7 @@ async function autoAccess(from, to, allow, noMetro, at) {
   if (d <= (ok('walk') ? WALK_PREFER_M : SHORT_WALK_M)) return { kind: 'walk', ...summarize([await route('foot', from, to)]) };
 
   const [bus, bike, metro] = await Promise.all([
-    ok('bus') && planBus(from, to, estimateRoute, isSoon(at)).then((list) => list[0]).catch(() => null),
+    ok('bus') && planBus(from, to, estimateRoute, isSoon(at), at).then((list) => list[0]).catch(() => null),
     ok('youbike') && bikeAccess(from, to, {}, ACCESS_BIKE_NEAR_M).catch(() => null),
     ok('metro') && d > METRO_ACCESS_MIN_M && metroAccess(from, to, allow, at).catch(() => null),
   ]);
@@ -593,7 +593,7 @@ function makeConnect(pref = {}) {
       if (bike) return bike;
     }
     if (kind === 'bus') {
-      const bus = await planBus(from, to, estimateRoute, isSoon(at)).then((list) => list[0]).catch(() => null);
+      const bus = await planBus(from, to, estimateRoute, isSoon(at), at).then((list) => list[0]).catch(() => null);
       if (bus) return { kind: 'bus', ...summarize(bus.legs, bus.total.duration) };
     }
     if (kind === 'metro' && !pref.noMetro) {

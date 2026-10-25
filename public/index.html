@@ -152,7 +152,7 @@
       <div>
         <label for="from">出發點</label>
         <div class="row">
-          <input id="from" placeholder="輸入捷運站或地點" />
+          <input id="from" placeholder="不填就從目前位置出發" />
           <button type="button" id="locate" title="使用目前位置">📍</button>
         </div>
         <p class="ex" data-for="from">例如：<button type="button">捷運科技大樓站</button><button type="button">台北車站</button><button type="button">板橋車站</button>・按 📍 用目前位置</p>
@@ -283,7 +283,7 @@
 
     // ---------- 交通工具（可多選） ----------
     const TOOLS = {
-      walk: '🚶 步行', bike: '🚲 YouBike', bus: '🚌 公車', metro: '🚇 捷運',
+      walk: '🚶 步行', bike: '🚲 YouBike', bus: '🚌 公車／客運', metro: '🚇 捷運',
       tra: '🚆 台鐵', thsr: '🚄 高鐵', car: '🚗 開車', moto: '🏍️ 騎機車', scooter: '🛵 共享機車', sharecar: '🚙 共享汽車', uber: '🚕 Uber',
     };
     const tools = new Set(['walk', 'bike', 'bus', 'metro']);
@@ -475,6 +475,12 @@
         <p class="hint">在 Google 地圖找到地點後按「分享」→「複製連結」，貼回出發地或目的地欄位再查一次即可；也可以貼上座標（例如 24.13702, 120.64192）。</p>
       </div>`;
     async function resolve(key, near) {
+      // 沒填出發點就從目前位置出發
+      if (key === 'from' && !points.from && !$('from').value.trim()) {
+        points.from = await currentPosition();
+        $('from').value = '目前位置';
+        return points.from;
+      }
       return points[key] || (points[key] = await lookup($(key).value, { from: '請輸入出發點', vehicle: '請輸入取車位置' }[key], near));
     }
     async function resolveStop(s, near) {
@@ -1713,7 +1719,7 @@
       });
     }
 
-    const ready = () => (points.from || $('from').value.trim()) && stops.some((s) => s.point || s.el.value.trim());
+    const ready = () => stops.some((s) => s.point || s.el.value.trim()); // 出發點沒填就用目前位置
 
     // 開／關交通工具；至少留一種
     $('tools').addEventListener('click', (e) => {

@@ -1,7 +1,7 @@
 // 公車轉乘規劃：台北市＋新北市用公開資料（不需金鑰），其他縣市與公路／國道客運用交通部 TDX
 import { gunzipSync } from 'node:zlib';
 import { distance } from './geo.js';
-import { tdx, hasTdx, daily, cached } from './tdx.js';
+import { tdx, hasTdx, daily, cached, taipeiNow, toMinutes } from './tdx.js';
 import { citiesAt, inBox } from './cities.js';
 
 const BASE = 'https://tcgbusfs.blob.core.windows.net/';
@@ -13,8 +13,15 @@ const ETA_MS = 30 * 1000;               // 到站時間 30 秒
 // 雙北範圍：這裡面的查詢只用台北市、新北市資料（加上相鄰縣市）
 const TAIPEI_AREA = [24.67, 25.30, 121.28, 122.01];
 const INTERCITY = 'InterCity'; // 公路客運、國道客運（全台一份）
-const INTERCITY_SPEED = 8;     // m/s，公路／國道客運停站少、常走快速道路
+const INTERCITY_SPEED = 8;     // m/s，公路／國道客運停站少、常走快速道路（沒有時刻表時才用）
+const HIGHWAY_GAP_M = 5000;    // 客運兩站距離超過這麼遠，當作走國道／快速道路
+const HIGHWAY_SPEED = 22;      // m/s，約時速 80 公里
 const DOWNLOAD_MS = 3 * 60 * 1000; // 路線站序檔案很大，下載逾時放寬
+const SCHEDULE_MS = 5 * 60 * 1000; // 客運時刻表全台一份約 57 MB
+const SCHEDULE_RETRY_MS = 10 * 60 * 1000; // 時刻表載入失敗，隔一段時間再試
+const ETA_BATCH = 80;          // 客運即時到站一次查幾條路線（只查起訖點附近的，免費金鑰每分鐘只能 5 次）
+const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const DAY_S = 24 * 60 * 60;
 const LOAD_WAIT_MS = 8000;     // 查詢時最多等還沒載入的縣市這麼久，其餘在背景繼續載入，下次查詢就有
 const ETA_WAIT_MS = 5000;      // 即時到站抓太久就先用上一次的資料
 
@@ -70,11 +77,16 @@ function indexLines(lines) {
   const grid = new Map();
   for (const line of lines.values()) {
     line.stops.sort((a, b) => a.seq - b.seq);
-    // 累計沿線距離，用來估算搭乘時間
-    let acc = 0;
+    // 累計沿線距離與估計車程：客運站距很長的段落多半走國道，用比較快的速度
+    let acc = 0, time = 0;
     line.stops.forEach((s, i) => {
-      if (i) acc += distance(line.stops[i - 1], s);
+      if (i) {
+        const d = distance(line.stops[i - 1], s);
+        acc += d;
+        time += d / (line.source === INTERCITY && d > HIGHWAY_GAP_M ? HIGHWAY_SPEED : line.speed);
+      }
       s.along = acc;
+      s.est = time;
       addToGrid(grid, { line, i, stop: s });
     });
   }
@@ -149,12 +161,15 @@ function getTdxNetwork(source) {
       if (r.stops.length < 2) continue;
       const key = `${r.sub}_${r.dir}`;
       const stops = r.stops.map(([uid, seq, name, lat, lng, station]) => ({
-        id: tdxStopId(r.route, r.dir, uid), location: station, seq, name, lat, lng,
+        id: tdxStopId(r.route, r.dir, uid), uid, location: station, seq, name, lat, lng,
       }));
       stops.sort((a, b) => a.seq - b.seq);
       lines.set(key, {
         key,
-        name: r.name,
+        source,
+        route: r.route,
+        name: source === INTERCITY ? `客運 ${r.name}` : r.name, // 畫面上看得出是客運
+
         headsign: `往${stops.at(-1).name}`,
         speed: source === INTERCITY ? INTERCITY_SPEED : BUS_SPEED,
         stops,
@@ -183,6 +198,7 @@ const within = (promise, ms, fallback) =>
 
 // 取得所有用得到的路網；TDX 某個縣市失敗或還在下載時先略過，其他照樣能規劃
 async function getNetworks(points) {
+  if (sourcesFor(points).includes(INTERCITY)) loadTimetables();
   const list = await Promise.all([
     getNetwork(),
     ...sourcesFor(points).map((s) => within(getTdxNetwork(s).catch(() => null), LOAD_WAIT_MS, null)),
@@ -206,28 +222,217 @@ async function getTaipeiEta() {
 // TDX 的 StopStatus：0 正常、1 尚未發車、2 交管不停靠、3 末班車已過、4 今日未營運，換成與雙北相同的代碼
 const lastTdxEta = new Map();
 
+const ETA_FIELDS = 'RouteUID,Direction,StopUID,EstimateTime,StopStatus';
+
+function addEta(list, data) {
+  for (const e of list) {
+    const v = e.StopStatus === 0 && e.EstimateTime != null ? e.EstimateTime : e.StopStatus ? -e.StopStatus : NaN;
+    const id = tdxStopId(e.RouteUID, e.Direction, e.StopUID);
+    // 同一站有多筆（不同子路線）時取最快到的
+    const cur = data.get(id);
+    if (cur == null || (v >= 0 && (cur < 0 || v < cur))) data.set(id, v);
+  }
+  return data;
+}
+
 function getTdxEta(source) {
-  // 公路／國道客運的到站資料全台一份太大（約 15 MB），不抓，用預設等車時間
-  if (source === INTERCITY) return new Map();
   return cached(`bus-eta:${source}`, ETA_MS, async () => {
-    const list = await tdx(`v2/Bus/EstimatedTimeOfArrival/City/${source}`, { $select: 'RouteUID,Direction,StopUID,EstimateTime,StopStatus' });
-    const data = new Map();
-    for (const e of list) {
-      const v = e.StopStatus === 0 && e.EstimateTime != null ? e.EstimateTime : e.StopStatus ? -e.StopStatus : NaN;
-      const id = tdxStopId(e.RouteUID, e.Direction, e.StopUID);
-      // 同一站有多筆（不同子路線）時取最快到的
-      const cur = data.get(id);
-      if (cur == null || (v >= 0 && (cur < 0 || v < cur))) data.set(id, v);
-    }
+    const list = await tdx(`v2/Bus/EstimatedTimeOfArrival/City/${source}`, { $select: ETA_FIELDS });
+    const data = addEta(list, new Map());
     lastTdxEta.set(source, data);
     return data;
   }).catch(() => lastTdxEta.get(source) || new Map()); // 抓不到沿用舊資料
 }
 
-// 各份資料的站牌 id 不會重複，合併成一個查詢
-async function getEta(points) {
-  const maps = await Promise.all([getTaipeiEta(), ...sourcesFor(points).map((s) => within(getTdxEta(s), ETA_WAIT_MS, lastTdxEta.get(s) || new Map()))]);
+// 公路／國道客運的到站資料全台一份太大（約 15 MB），只查用得到的路線（起訖點附近），每條路線 30 秒內不重抓
+const intercityEta = new Map();   // 站牌 id → 到站時間
+const intercityFetch = new Map(); // RouteUID → { at, job }
+
+function getIntercityEta(routes) {
+  const now = Date.now();
+  const wanted = [...new Set(routes)];
+  const stale = wanted.filter((r) => !(now - (intercityFetch.get(r)?.at || 0) < ETA_MS));
+  for (let k = 0; k < stale.length; k += ETA_BATCH) {
+    const chunk = stale.slice(k, k + ETA_BATCH);
+    const job = tdx(`v2/Bus/EstimatedTimeOfArrival/${INTERCITY}`, {
+      $filter: chunk.map((r) => `RouteUID eq '${r}'`).join(' or '),
+      $select: ETA_FIELDS,
+    }).then((list) => {
+      // 這幾條路線換成新資料（同一站取最快的，不跟舊資料比）
+      const prefixes = chunk.map((r) => `${r}_`);
+      for (const id of intercityEta.keys()) if (prefixes.some((p) => id.startsWith(p))) intercityEta.delete(id);
+      addEta(list, intercityEta);
+    }).catch(() => chunk.forEach((r) => intercityFetch.delete(r))); // 抓不到沿用舊資料，下次重抓
+    chunk.forEach((r) => intercityFetch.set(r, { at: now, job }));
+  }
+  return Promise.all(wanted.map((r) => intercityFetch.get(r)?.job)).then(() => intercityEta);
+}
+
+// 起訖點附近的客運路線（近的優先），決定要查哪些路線的即時到站
+const intercityRoutes = (hits) => [...new Set(hits
+  .filter((h) => h.line.source === INTERCITY)
+  .sort((a, b) => a.d - b.d)
+  .map((h) => h.line.route))].slice(0, ETA_BATCH);
+
+// 各份資料的站牌 id 不會重複，合併成一個查詢；客運只查 routes 這幾條路線
+async function getEta(points, routes = []) {
+  const maps = await Promise.all([
+    getTaipeiEta(),
+    ...sourcesFor(points).filter((s) => s !== INTERCITY)
+      .map((s) => within(getTdxEta(s), ETA_WAIT_MS, lastTdxEta.get(s) || new Map())),
+    routes.length ? within(getIntercityEta(routes), ETA_WAIT_MS, intercityEta) : new Map(),
+  ]);
   return { get: (id) => { for (const m of maps) if (m.has(id)) return m.get(id); } };
+}
+
+// ---------- 客運時刻表 ----------
+
+// TDX 的班表一天抓一次，壓縮成每條子路線方向：站牌 + 每班車 [行駛星期（位元）, 各站時間（分鐘）]
+const schedules = () => daily(`bus-schedule-${INTERCITY}`, async () => {
+  const list = await tdx(`v2/Bus/Schedule/${INTERCITY}`, { $select: 'SubRouteUID,Direction,Timetables' }, { timeout: SCHEDULE_MS });
+  const out = {};
+  for (const r of list) {
+    const tt = (out[`${r.SubRouteUID}_${r.Direction}`] ||= { stops: [], trips: [] });
+    const col = new Map(tt.stops.map((uid, k) => [uid, k]));
+    for (const trip of r.Timetables || []) {
+      if (!trip.ServiceDay || !(trip.StopTimes?.length > 1)) continue;
+      const days = DAYS.reduce((m, d, k) => (trip.ServiceDay[d] ? m | (1 << k) : m), 0);
+      const times = [];
+      let prev = -Infinity;
+      for (const st of [...trip.StopTimes].sort((a, b) => a.StopSequence - b.StopSequence)) {
+        let m = toMinutes(st.DepartureTime || st.ArrivalTime);
+        if (!Number.isFinite(m)) continue;
+        if (m < prev - 12 * 60) m += 24 * 60; // 過午夜
+        prev = m;
+        if (!col.has(st.StopUID)) { col.set(st.StopUID, tt.stops.length); tt.stops.push(st.StopUID); }
+        times[col.get(st.StopUID)] = m;
+      }
+      if (days) tt.trips.push([days, times]);
+    }
+  }
+  return out;
+});
+
+let timetables = null;
+let timetablesDate = '';
+let timetablesTried = 0;
+
+// 背景載入，載好之前客運照舊用平均速度估算
+function loadTimetables() {
+  const { date } = taipeiNow();
+  if (timetablesDate === date || Date.now() - timetablesTried < SCHEDULE_RETRY_MS) return;
+  timetablesTried = Date.now();
+  schedules()
+    .then((t) => { timetables = t; timetablesDate = date; })
+    .catch((e) => console.log('客運時刻表載入失敗：', e.message));
+}
+
+// 一條客運路線依時刻表整理：offsets 是各站距第一站幾秒（典型值，算車程），trips 是每班車各站時間（算等車）
+function timingOf(line) {
+  if (line.source !== INTERCITY || !timetables) return null;
+  if (line.timingFrom !== timetables) {
+    const tt = timetables[line.key];
+    line.timing = tt?.trips.length ? buildTiming(line, tt) : null;
+    line.timingFrom = timetables;
+  }
+  return line.timing;
+}
+
+const median = (list) => list.sort((a, b) => a - b)[Math.floor(list.length / 2)];
+
+function buildTiming(line, tt) {
+  const col = new Map(tt.stops.map((uid, k) => [uid, k]));
+  const cols = line.stops.map((s) => col.get(s.uid));
+  const trips = tt.trips.map(([days, times]) => {
+    const at = cols.map((c) => (c == null ? null : times[c] ?? null));
+    return { days, at, first: at.findIndex((v) => v != null) };
+  }).filter((t) => t.first >= 0);
+  if (!trips.length) return null;
+
+  // 從最前面那站發車的班次，各站與發車站的時間差取中位數
+  const f0 = Math.min(...trips.map((t) => t.first));
+  const ref = trips.filter((t) => t.first === f0);
+  const raw = line.stops.map((_, k) => {
+    const diffs = ref.filter((t) => t.at[k] != null && t.at[k] >= t.at[f0]).map((t) => t.at[k] - t.at[f0]);
+    return diffs.length ? median(diffs) * 60 : null;
+  });
+  const known = raw.flatMap((v, k) => (v == null ? [] : [k]));
+  let offsets = null;
+  if (known.length >= 2) {
+    // 沒有時間的站依沿線距離內插，頭尾外推用平均速度
+    const along = (k) => line.stops[k].along;
+    offsets = raw.map((v, k) => {
+      if (v != null) return v;
+      const p = known.findLast((x) => x < k), q = known.find((x) => x > k);
+      if (p != null && q != null) return raw[p] + (raw[q] - raw[p]) * (along(k) - along(p)) / ((along(q) - along(p)) || 1);
+      return p != null ? raw[p] + (along(k) - along(p)) / line.speed : raw[q] - (along(q) - along(k)) / line.speed;
+    });
+    for (let k = 1; k < offsets.length; k++) offsets[k] = Math.max(offsets[k], offsets[k - 1]);
+  }
+  return { offsets, trips, dep: new Map() };
+}
+
+// 第 k 站在星期 day 的各班發車時間（當天 0 點起算幾秒，排序好）；班表沒列到這站的班次用 offsets 推算
+function departures(timing, k, day) {
+  const key = day * 10000 + k;
+  let list = timing.dep.get(key);
+  if (!list) {
+    list = [];
+    for (const t of timing.trips) {
+      if (!((t.days >> day) & 1)) continue;
+      if (t.at[k] != null) list.push(t.at[k] * 60);
+      else if (timing.offsets) list.push(t.at[t.first] * 60 + timing.offsets[k] - timing.offsets[t.first]);
+    }
+    list.sort((a, b) => a - b);
+    timing.dep.set(key, list);
+  }
+  return list;
+}
+
+function firstAfter(list, t) {
+  let lo = 0, hi = list.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (list[mid] < t) lo = mid + 1; else hi = mid;
+  }
+  return lo < list.length ? list[lo] : Infinity;
+}
+
+const hhmm = (sec) => {
+  const m = Math.floor(sec / 60);
+  return `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+};
+
+// 依時刻表，elapsed 秒後到第 i 站要等多久；沒有這條路線的時刻表回傳 null
+function scheduledWait(line, i, clock, elapsed) {
+  const timing = timingOf(line);
+  if (!timing) return null;
+  const reach = clock.sec + elapsed;
+  const today = departures(timing, i, clock.day);
+  const yesterday = departures(timing, i, (clock.day + 6) % 7); // 前一天過午夜的班次
+  const next = Math.min(firstAfter(today, reach), firstAfter(yesterday, reach + DAY_S) - DAY_S);
+  if (Number.isFinite(next)) return { wait: next - reach, text: `預定 ${hhmm(next)} 發車` };
+  if (today.length) return { wait: Infinity, text: '末班車已過' };
+  // 這站完全沒有班次資料（班表不完整）就不判斷
+  if (DAYS.some((_, d) => departures(timing, i, d).length)) return { wait: Infinity, text: '今日未營運' };
+  return null;
+}
+
+// 規劃用的時間：指定了 at（例如火車到站時間）就用它；現在要搭就用現在；都不是就不知道幾點，不看時刻表
+function clockOf(live, at) {
+  const c = at || (live ? taipeiNow() : null);
+  return c && { day: new Date(`${c.date}T00:00:00Z`).getUTCDay(), sec: c.minutes * 60 };
+}
+
+// 等車時間：趕得上的即時到站優先；客運沒有即時資料、尚未發車或趕不上這班時看時刻表；都沒有就照原本估算。
+// text：用時刻表算的才有，畫面顯示預定發車時間
+function makeWaiter(eta, clock) {
+  return (line, i, elapsed) => {
+    const e = eta.get(line.stops[i].id);
+    if (e != null && (NO_SERVICE.has(e) || e >= elapsed)) return { wait: waitFor(e, elapsed), text: null };
+    const s = clock && scheduledWait(line, i, clock, elapsed);
+    return s || { wait: waitFor(e, elapsed), text: null };
+  };
 }
 
 // -1 尚未發車、-2 交管不停靠、-3 末班車已過、-4 今日未營運
@@ -249,7 +454,12 @@ function waitFor(eta, walkTime) {
 
 const walkTime = (m) => (m * WALK_DETOUR) / WALK_SPEED;
 const rideLength = (line, i, j) => line.stops[j].along - line.stops[i].along;
-const rideTime = (line, i, j) => rideLength(line, i, j) / line.speed;
+// 客運有時刻表就用時刻表的站間時間，否則用沿線距離與平均速度估算
+function rideTime(line, i, j) {
+  const off = timingOf(line)?.offsets;
+  const t = off ? off[j] - off[i] : 0;
+  return t > 0 ? t : line.stops[j].est - line.stops[i].est;
+}
 
 // ---------- 規劃 ----------
 
@@ -265,12 +475,15 @@ function nearestPerLine(grids, point) {
 }
 
 // 找出不轉乘及轉一次的方案，依估計總時間排序。
-// live = false：不是現在要搭（例如火車幾小時後才到站），即時到站時間不適用，等車時間用預設值
-export async function planBus(from, to, route, live = true) {
-  const [networks, eta] = await Promise.all([getNetworks([from, to]), live ? getEta([from, to]) : new Map()]);
+// live = false：不是現在要搭（例如火車幾小時後才到站），即時到站時間不適用，等車時間用預設值。
+// at：大約幾點開始搭（{ date, minutes }），客運依這個時間查時刻表
+export async function planBus(from, to, route, live = true, at = null) {
+  const networks = await getNetworks([from, to]);
   const grids = networks.map((n) => n.grid);
   const boards = nearestPerLine(grids, from);
   const alights = nearestPerLine(grids, to);
+  const eta = live ? await getEta([from, to], intercityRoutes([...boards.values(), ...alights.values()])) : new Map();
+  const waitAt = makeWaiter(eta, clockOf(live, at));
   const options = [];
 
   // 不用轉乘
@@ -278,7 +491,7 @@ export async function planBus(from, to, route, live = true) {
     const a = alights.get(key);
     if (!a || a.i <= b.i || rideLength(b.line, b.i, a.i) < MIN_RIDE_M) continue;
     const w0 = walkTime(b.d);
-    const cost = w0 + waitFor(eta.get(b.stop.id), w0) + rideTime(b.line, b.i, a.i) + walkTime(a.d);
+    const cost = w0 + waitAt(b.line, b.i, w0).wait + rideTime(b.line, b.i, a.i) + walkTime(a.d);
     if (cost < Infinity) options.push({ cost, direct: true, rides: [{ line: b.line, i: b.i, j: a.i }], walk0: b.d, walkEnd: a.d });
   }
 
@@ -290,7 +503,7 @@ export async function planBus(from, to, route, live = true) {
   const bestPair = new Map();
   for (const [, b] of boards) {
     const w0 = walkTime(b.d);
-    const wait1 = waitFor(eta.get(b.stop.id), w0);
+    const wait1 = waitAt(b.line, b.i, w0).wait;
     if (wait1 === Infinity) continue;
     for (let i = b.i + 1; i < b.line.stops.length; i++) {
       if (rideLength(b.line, b.i, i) < MIN_RIDE_M) continue;
@@ -300,7 +513,7 @@ export async function planBus(from, to, route, live = true) {
         if (rideLength(t.line, t.i, t.alight.i) < MIN_RIDE_M) continue;
         // 第二班車：用轉乘站的即時到站時間，算到時要等多久
         const reach = w0 + wait1 + rideTime(b.line, b.i, i) + walkTime(t.d) + TRANSFER_PENALTY;
-        const wait2 = waitFor(eta.get(t.stop.id), reach);
+        const wait2 = waitAt(t.line, t.i, reach).wait;
         if (wait2 === Infinity) continue;
         const cost = reach + wait2 + rideTime(t.line, t.i, t.alight.i) + walkTime(t.alight.d);
         const pair = `${b.line.key}|${t.line.key}`;
@@ -334,8 +547,9 @@ export async function planBus(from, to, route, live = true) {
   top.sort((a, b) => a.cost - b.cost);
 
   // 用實際步行路線算出的總時間重新排序
-  const built = await Promise.all(top.map((o) => buildOption(o, from, to, eta, route)));
-  return built.sort((a, b) => a.total.duration - b.total.duration);
+  const built = await Promise.all(top.map((o) => buildOption(o, from, to, eta, waitAt, route)));
+  // 實際步行比估計久、趕不上末班車的方案拿掉
+  return built.filter((o) => Number.isFinite(o.total.duration)).sort((a, b) => a.total.duration - b.total.duration);
 }
 
 function busLeg(r, eta) {
@@ -365,7 +579,7 @@ function busLeg(r, eta) {
   };
 }
 
-async function buildOption(o, from, to, eta, route) {
+async function buildOption(o, from, to, eta, waitAt, route) {
   const buses = o.rides.map((r) => busLeg(r, eta));
   const walks = [route('foot', from, buses[0].board)];
   if (buses.length === 2) {
@@ -381,13 +595,18 @@ async function buildOption(o, from, to, eta, route) {
     ? [w0, buses[0], wt, buses[1], wEnd].filter(Boolean)
     : [w0, buses[0], wEnd];
   // 總時間用實際步行路線重算等車時間
+  // 用時刻表算的，畫面顯示預定發車時間
+  const waitOf = (k, elapsed) => {
+    const w = waitAt(o.rides[k].line, o.rides[k].i, elapsed);
+    if (w.text) buses[k].etaText = w.text;
+    return w.wait;
+  };
   let t = w0.duration;
-  let wait = waitFor(buses[0].eta ?? NaN, t);
+  let wait = waitOf(0, t);
   t += wait + buses[0].duration;
   if (buses.length === 2) {
     t += (wt?.duration || 0) + TRANSFER_PENALTY;
-    const w2 = waitFor(buses[1].eta ?? NaN, t);
-    wait += TRANSFER_PENALTY + w2;
+    wait += TRANSFER_PENALTY + waitOf(1, t);
   }
   return {
     legs,
@@ -402,13 +621,19 @@ async function buildOption(o, from, to, eta, route) {
 
 // 出發點附近的公車即時到站（每條路線方向取最近的站）
 export async function nearbyArrivals(point, limit = 15) {
-  const [networks, eta] = await Promise.all([getNetworks([point]), getEta([point])]);
-  return [...nearestPerLine(networks.map((n) => n.grid), point).values()]
-    .filter((h) => h.i < h.line.stops.length - 1) // 終點站上不了車
+  const networks = await getNetworks([point]);
+  const hits = [...nearestPerLine(networks.map((n) => n.grid), point).values()]
+    .filter((h) => h.i < h.line.stops.length - 1); // 終點站上不了車
+  const eta = await getEta([point], intercityRoutes(hits));
+  const waitAt = makeWaiter(eta, clockOf(true));
+  return hits
     .map((h) => {
       const e = eta.get(h.stop.id);
+      // 客運沒有即時到站時，顯示時刻表的下一班
+      const w = waitAt(h.line, h.i, 0);
+      const live = Number.isNaN(e) ? null : e ?? null;
       return { route: h.line.name, headsign: h.line.headsign, stop: h.stop.name, distance: Math.round(h.d),
-               eta: Number.isNaN(e) ? null : e ?? null, etaText: etaText(e) };
+               eta: w.text ? (Number.isFinite(w.wait) ? w.wait : null) : live, etaText: w.text || etaText(e) };
     })
     .sort((a, b) => (a.eta >= 0 ? a.eta : 1e9) - (b.eta >= 0 ? b.eta : 1e9) || a.distance - b.distance)
     .slice(0, limit);
@@ -418,8 +643,11 @@ export async function nearbyArrivals(point, limit = 15) {
 export const stillLoading = (points) => sourcesFor(points).some((s) => loading.has(s));
 
 // 啟動時先載入，第一次查詢才不會等太久
-// 公路客運全台一份、第一次要抓約半分鐘，有金鑰就在背景先載入
+// 公路客運全台一份、第一次要抓約半分鐘，有金鑰就在背景先載入（含時刻表）
 export const warmUp = () => {
-  if (hasTdx()) getTdxNetwork(INTERCITY).catch((e) => console.log('公路客運資料載入失敗：', e.message));
+  if (hasTdx()) {
+    getTdxNetwork(INTERCITY).catch((e) => console.log('公路客運資料載入失敗：', e.message));
+    loadTimetables();
+  }
   return Promise.all([getNetwork(), getTaipeiEta()]);
 };
