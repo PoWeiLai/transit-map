@@ -80,6 +80,9 @@
     .tabs button.on { background:var(--fg); color:var(--bg); border-color:var(--fg); font-weight:600; }
     .tabs button.svc { border:2px solid #f59e0b; font-weight:600; }
     body.lookup .route-only { display:none !important; }
+    .garbage-next { padding:10px; border-radius:8px; background:#fef3c7; color:#111; margin-bottom:8px; }
+    .garbage-next .big { font-size:22px; font-weight:700; }
+    .garbage-stops li.truck { font-weight:700; }
     button.link { background:none; border:none; padding:0 4px; color:#2563eb; text-decoration:underline; cursor:pointer; font:inherit; }
     .tabs button.svc.on { background:#f59e0b; color:#111; border-color:#f59e0b; }
     .nearby-item { padding:4px 0; border-bottom:1px solid var(--line, #e5e7eb); }
@@ -1118,7 +1121,15 @@
         const r = await nearbyCache.get(key);
         if (!el.isConnected) continue; // 畫面已經換了
         el.innerHTML = r ? NEARBY[kind].render(r) : '<span class="muted">暫時查不到，請稍後再試，或用下面的連結在 Google 地圖查詢。</span>';
-        if (kind === 'garbage') watchGarbage(el, near);
+        if (kind === 'garbage') {
+          watchGarbage(el, near);
+          const box = el.querySelector('.garbage-route');
+          if (box && r?.stops.length) {
+            box.dataset.line = r.stops[0].line;
+            box.dataset.stop = r.stops[0].name;
+            refreshGarbageRoute(box, true);
+          }
+        }
       }
     }
 
@@ -1163,21 +1174,26 @@
         <p class="hint">「預計」是依垃圾車即時位置推算（目前只有新北）；高雄是環保局的今日預估；其他為表定時間，遇假日、颱風可能異動。</p>`;
     }
 
-    // 會經過這裡的垃圾車：每條路線幾點經過、現在到哪；附近正在開的垃圾車
+    // 最上面：下一台垃圾車幾點到、現在到哪；下面簡單列出其他會經過的路線
     function garbageListHtml(r) {
       const time = new Date(Date.now() + 8 * 3600000).toISOString().slice(11, 16);
-      const stopsHtml = r.stops.length
-        ? `<p><b>會經過這裡的垃圾車（${r.stops.length} 條路線）</b></p>${r.stops.map((s) => item(`<b>${esc(s.when)}</b>${s.soon != null && s.soon >= 0 && s.soon <= 30 ? ' <span class="eta-now">快到了</span>' : ''}・${esc(s.name)}`,
-          [s.progress && progressText(s.progress), [meters(s.distance), esc(s.route), s.end && `停到 ${esc(s.end)}`, s.note && esc(s.note)].filter(Boolean).join('・'),
-            `<button type="button" class="link" data-garbage-line="${esc(s.line)}" data-garbage-stop="${esc(s.name)}">看整條路線進度</button>`].filter(Boolean).join('<br>'))).join('')}`
-        : '<span class="muted">600 公尺內沒有清運點資料。</span>';
-      const trucks = r.trucks.length
-        ? `<p><b>🚛 附近正在開的垃圾車</b></p>${r.trucks.map((t) => item(`${esc(t.location)}`, `${meters(t.distance)}・${t.ago ? `${t.ago} 分鐘前` : '剛剛'}回報・${esc(t.car)}`)).join('')}`
+      if (!r.stops.length) return '<span class="muted">600 公尺內沒有清運點資料，換個地點或點地圖上其他位置試試。</span>';
+      const [next, ...others] = r.stops;
+      const left = next.soon != null && next.soon >= 0 ? `（還有 ${next.soon} 分鐘）` : '';
+      const head = `<div class="garbage-next">
+          <div class="big">🚛 ${esc(next.when)}${left}</div>
+          <div>在「${esc(next.name)}」・離你 ${meters(next.distance)}</div>
+          <div>${next.progress ? progressText(next.progress) : '垃圾車還沒出發（或這個縣市沒有即時位置），時間為表定'}</div>
+        </div>`;
+      const rest = others.length
+        ? `<p><b>其他會經過這裡的垃圾車</b></p>${others.map((x) => item(`<b>${esc(x.when)}</b>・${esc(x.name)}`,
+          [x.progress && progressText(x.progress), meters(x.distance),
+            `<button type="button" class="link" data-garbage-line="${esc(x.line)}" data-garbage-stop="${esc(x.name)}">看這台的進度</button>`].filter(Boolean).join('・'))).join('')}`
         : '';
       const live = r.trucks.length || r.stops.some((x) => x.progress)
-        ? `<p class="hint">🔴 垃圾車位置每 30 秒自動更新（${time} 更新），地圖上的 🚛 會跟著移動。</p>`
-        : '<p class="hint">附近現在沒有正在開的垃圾車（還沒出車或已收班），出車後會自動顯示在地圖上。</p>';
-      return stopsHtml + trucks + live;
+        ? `<p class="hint">🔴 垃圾車位置每 30 秒自動更新（${time}），地圖上的 🚛 會跟著移動。</p>`
+        : '<p class="hint">附近現在沒有正在開的垃圾車，出車後會自動出現在地圖上。</p>';
+      return head + rest + live;
     }
 
     // 地圖上的垃圾車：同一台車只移動位置，不重畫
@@ -1226,6 +1242,7 @@
       await refreshGarbageRoute(box, true);
       box.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
+    // 路程進度：垃圾車在路上時，列出它到你這站之間的每一站；還沒出發就收起整條路線
     async function refreshGarbageRoute(box, first = false) {
       let r;
       try { r = await api('/api/garbage/route?line=' + encodeURIComponent(box.dataset.line)); } catch (e) { box.innerHTML = `<span class="muted">${esc(e.message)}</span>`; return; }
@@ -1237,8 +1254,15 @@
       // 這條路線的垃圾車就算離你很遠也標出來
       routeTruck = g ? { ...g, route: r.route } : null;
       updateTrucks(lastGarbage);
-      box.innerHTML = `<h3>${esc(r.route)}</h3>${g ? `<p>${progressText({ ...g, left: 1 }).replace(/，還有.*$/, '')}</p>` : '<p class="muted">這條路線現在沒有垃圾車的即時位置（還沒出車、已收班，或這個縣市沒有即時資料）。</p>'}
-        <ol class="garbage-stops">${r.stops.map((x, k) => `<li class="${g && k < g.atIndex ? 'muted' : ''}">${esc(x.start)}　${esc(x.name)}${g && k === g.atIndex ? ' <b>🚛 垃圾車在這</b>' : ''}${x.name === box.dataset.stop ? ' <b>📍 你查的</b>' : ''}</li>`).join('')}</ol>`;
+      const mine = r.stops.findIndex((x) => x.name === box.dataset.stop);
+      const li = (x, k) => `<li class="${g && k === g.atIndex ? 'truck' : ''}">${esc(x.start)}　${esc(x.name)}${g && k === g.atIndex ? ' 🚛 垃圾車在這' : ''}${k === mine ? ' 📍 你這裡' : ''}</li>`;
+      if (g && mine > g.atIndex) {
+        box.innerHTML = `<h3>路程進度：還有 ${mine - g.atIndex} 站（${esc(r.route)}）</h3>
+          <ol class="garbage-stops" start="${g.atIndex + 1}">${r.stops.slice(g.atIndex, mine + 1).map((x, k) => li(x, g.atIndex + k)).join('')}</ol>`;
+      } else {
+        box.innerHTML = `<h3>${esc(r.route)}</h3><p class="muted">${g ? '垃圾車已經過你這裡了。' : '垃圾車還沒出發或沒有即時位置。'}</p>
+          <details><summary>整條路線（${r.stops.length} 站）</summary><ol class="garbage-stops">${r.stops.map(li).join('')}</ol></details>`;
+      }
     }
     $('out').addEventListener('click', (e) => {
       const b = e.target.closest('button[data-garbage-line]');
@@ -2053,6 +2077,12 @@
 
     map.on('click', (e) => {
       const { lat, lng } = e.latlng;
+      if (document.body.classList.contains('lookup')) {
+        placePoint = { lat, lng, name: '地圖選點' };
+        $('place').value = '地圖選點';
+        $('form').requestSubmit();
+        return;
+      }
       const label = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
       const box = document.createElement('div');
       box.innerHTML = '<button data-k="from">設為出發點</button> <button data-k="stop">加入要去的地方</button>' +
