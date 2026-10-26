@@ -1250,11 +1250,12 @@
       }
     });
 
-    // 從查附近的出發地，規劃到選的公廁／置物櫃（回到規劃路線，至少開步行）
+    // 從查附近的出發地，規劃到選的公廁／置物櫃（回到規劃路線）。
+    // 步行、YouBike、公車、捷運都開著，系統自動選最適合的，使用者可以在行程總覽點選換別的方式
     function goTo(dest) {
       const from = placePoint;
       for (const k of Object.keys(SERVICES)) tools.delete(k);
-      tools.add('walk');
+      for (const k of ['walk', 'bike', 'bus', 'metro']) tools.add(k);
       try { localStorage.setItem('tools', JSON.stringify([...tools])); } catch { /* 無法儲存就算了 */ }
       applyTools();
       if (from) { points.from = from; $('from').value = from.name; }
