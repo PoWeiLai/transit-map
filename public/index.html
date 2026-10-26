@@ -87,6 +87,8 @@
     .tabs button.svc.on { background:#f59e0b; color:#111; border-color:#f59e0b; }
     .nearby-item { padding:4px 0; border-bottom:1px solid var(--line, #e5e7eb); }
     .nearby-item:last-child { border-bottom:none; }
+    .nearby-item[data-focus] { cursor:pointer; }
+    .nearby-item[data-focus]:hover { background:var(--hover, rgba(127,127,127,.12)); }
     .bikeinfo { background:var(--card); color:var(--fg); padding:6px 9px; border-radius:8px; font-size:12px; line-height:1.5;
                 box-shadow:0 1px 4px rgba(0,0,0,.3); max-width:190px; }
     .bikeinfo .legend { margin-top:3px; }
@@ -1087,15 +1089,15 @@
 
     // ---------- 附近找：寄物、公廁、垃圾車 ----------
     // 置物櫃：OpenStreetMap（只有部分地點）；公廁：環境部建檔公廁（或 OpenStreetMap）；
-    // 垃圾車：有公開資料的縣市的清運點與表定經過時間＋即時位置。都附 Google 地圖搜尋
+    // 垃圾車：有公開資料的縣市的清運點與表定經過時間＋即時位置。結果都直接標在網站地圖上
     const NEARBY = {
-      luggage: { title: '🧳 寄放行李', api: 'lockers', search: '置物櫃 寄物', render: lockersHtml },
-      toilet: { title: '🚻 公廁', api: 'toilets', search: '公廁', render: toiletsHtml },
-      garbage: { title: '🚛 垃圾車', api: 'garbage', search: '垃圾車 清運點', render: garbageHtml },
+      luggage: { title: '🧳 寄放行李', api: 'lockers', render: lockersHtml },
+      toilet: { title: '🚻 公廁', api: 'toilets', render: toiletsHtml },
+      garbage: { title: '🚛 垃圾車', api: 'garbage', render: garbageHtml },
     };
     const nearbyCache = new Map();
     const nearbyLayer = L.layerGroup().addTo(map);
-    const item = (main, sub) => `<div class="nearby-item">${main}${sub ? `<br><span class="muted">${sub}</span>` : ''}</div>`;
+    const item = (main, sub, at) => `<div class="nearby-item"${at ? ` data-focus="${at.lat},${at.lng}" role="button" tabindex="0"` : ''}>${main}${sub ? `<br><span class="muted">${sub}</span>` : ''}</div>`;
     // 帶我去：把這個地點當目的地，從出發地規劃路線
     const goButton = (x, name) => ` <button type="button" class="link" data-go="${x.lat},${x.lng}" data-go-name="${esc(name)}">🚶 帶我去</button>`;
     const meters = (d) => (d >= 1000 ? `${(d / 1000).toFixed(1)} 公里` : `${d} 公尺`);
@@ -1103,13 +1105,8 @@
     function nearbyPanel(p, services, where = '目的地') {
       nearbyLayer.clearLayers();
       const q = `${p.lat.toFixed(5)},${p.lng.toFixed(5)}`;
-      return services.map((k) => {
-        const n = NEARBY[k];
-        const g = `https://www.google.com/maps/search/${encodeURIComponent(n.search)}/@${q},16z`;
-        return `<div class="card"><h2>${n.title}・${esc(where)}附近</h2>
-          <div class="nearby" data-kind="${k}" data-near="${q}"><span class="muted">查詢中…</span></div>
-          <div class="links"><a target="_blank" rel="noopener" href="${g}">🔎 在 Google 地圖找附近${esc(n.search.split(' ')[0])}</a></div></div>`;
-      }).join('');
+      return services.map((k) => `<div class="card"><h2>${NEARBY[k].title}・${esc(where)}附近</h2>
+          <div class="nearby" data-kind="${k}" data-near="${q}"><span class="muted">查詢中…</span></div></div>`).join('');
     }
 
     async function fillNearby() {
@@ -1120,7 +1117,11 @@
         if (!nearbyCache.has(key) || kind === 'garbage') nearbyCache.set(key, api(`/api/${NEARBY[kind].api}?near=${near}`).catch(() => null));
         const r = await nearbyCache.get(key);
         if (!el.isConnected) continue; // 畫面已經換了
-        el.innerHTML = r ? NEARBY[kind].render(r) : '<span class="muted">暫時查不到，請稍後再試，或用下面的連結在 Google 地圖查詢。</span>';
+        el.innerHTML = r ? NEARBY[kind].render(r) : '<span class="muted">暫時查不到，請稍後再試。</span>';
+        // 公廁、置物櫃：地圖縮放到看得到出發地和最近的幾個
+        if (kind !== 'garbage' && nearbyLayer.getLayers().length) {
+          map.fitBounds(L.featureGroup([...nearbyLayer.getLayers(), ...tripLayer.getLayers()]).getBounds(), { padding: [40, 40], maxZoom: 17 });
+        }
         if (kind === 'garbage') {
           watchGarbage(el, near);
           const box = el.querySelector('.garbage-route');
@@ -1145,16 +1146,16 @@
     function lockersHtml(list) {
       markNearby(list, '🧳');
       return list.length
-        ? list.map((l) => item(esc(l.name) + goButton(l, l.name), [meters(l.distance), l.hours && esc(l.hours), l.fee && esc(l.fee)].filter(Boolean).join('・'))).join('')
-        : '<span class="muted">附近沒有公開的置物櫃資料（台鐵、捷運沒有公開），大車站多半有置物櫃或行李房，可以用下面的連結查詢。</span>';
+        ? list.map((l) => item(esc(l.name) + goButton(l, l.name), [meters(l.distance), l.hours && esc(l.hours), l.fee && esc(l.fee)].filter(Boolean).join('・'), l)).join('')
+        : '<span class="muted">5 公里內沒有置物櫃資料（台鐵、捷運沒有公開置物櫃資料，目前只有部分地點），大車站多半有置物櫃或行李房，可以到車站服務台詢問。</span>';
     }
 
     function toiletsHtml(r) {
       markNearby(r.toilets, '🚻');
       const list = r.toilets.length
         ? r.toilets.map((t) => item(`${esc(t.name)}${t.grade ? `<span class="muted">（${esc(t.grade)}）</span>` : ''}${goButton(t, t.address || t.name)}`,
-          [meters(t.distance), t.address && esc(t.address), t.type && esc(t.type), t.hours && esc(t.hours), t.diaper && '有尿布台'].filter(Boolean).join('・'))).join('')
-        : '<span class="muted">附近 5 公里內沒有公廁資料，可以用下面的連結查詢，或找附近的超商、加油站、捷運站。</span>';
+          [meters(t.distance), t.address && esc(t.address), t.type && esc(t.type), t.hours && esc(t.hours), t.diaper && '有尿布台'].filter(Boolean).join('・'), t)).join('')
+        : '<span class="muted">附近 5 公里內沒有公廁資料，可以找附近的超商、加油站、捷運站。</span>';
       return list + (r.source === 'osm' ? '<p class="hint">目前用 OpenStreetMap 的公廁資料，可能不完整。</p>' : '<p class="hint">資料來源：環境部全國公廁建檔資料。</p>');
     }
 
@@ -1271,6 +1272,15 @@
       if (go) {
         const [lat, lng] = go.dataset.go.split(',').map(Number);
         goTo({ lat, lng, name: go.dataset.goName });
+        return;
+      }
+      const f = e.target.closest('[data-focus]');
+      if (f && !e.target.closest('button')) {
+        const [lat, lng] = f.dataset.focus.split(',').map(Number);
+        map.setView([lat, lng], 18);
+        const m = nearbyLayer.getLayers().find((x) => x.getLatLng().equals([lat, lng]));
+        m?.openPopup();
+        if (isPhone()) $('map').scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
     });
 
