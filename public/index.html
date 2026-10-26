@@ -1047,8 +1047,32 @@
           ${navButtons}
         </div>
         ${nearbyHtml(r.nearby)}
+        ${luggageCard(to, '在目的地附近')}
         <p class="hint">時間含等車的估計值；到站時間每 30 秒更新，重新規劃即可取得最新資訊。</p>
       `);
+      fillLockers();
+    }
+
+    // ---------- 寄放行李 ----------
+    // 附近的置物櫃（OpenStreetMap，只有部分地點）＋ Google 地圖搜尋，大車站多半有置物櫃或行李房
+    const lockerCache = new Map();
+    function luggageCard(p, where) {
+      const q = `${p.lat.toFixed(5)},${p.lng.toFixed(5)}`;
+      const g = `https://www.google.com/maps/search/${encodeURIComponent('置物櫃 寄物')}/@${q},16z`;
+      return `<div class="card"><h2>🧳 ${esc(where)}寄放行李</h2>
+        <div class="lockers" data-near="${q}"><span class="muted">查詢附近置物櫃…</span></div>
+        <div class="links"><a target="_blank" rel="noopener" href="${g}">🔎 在 Google 地圖找附近置物櫃、寄物服務</a></div></div>`;
+    }
+    async function fillLockers() {
+      for (const el of document.querySelectorAll('.lockers[data-near]')) {
+        const q = el.dataset.near;
+        if (!lockerCache.has(q)) lockerCache.set(q, api('/api/lockers?near=' + q).catch(() => []));
+        const list = await lockerCache.get(q);
+        if (!el.isConnected) continue; // 畫面已經換了
+        el.innerHTML = list.length
+          ? list.map((l) => `<div>${esc(l.name)}<span class="muted">・${l.distance} 公尺${l.hours ? `・${esc(l.hours)}` : ''}${l.fee ? `・${esc(l.fee)}` : ''}</span></div>`).join('')
+          : '<span class="muted">附近沒有公開的置物櫃資料，可以用下面的連結在 Google 地圖查詢。</span>';
+      }
     }
 
     // ---------- 台鐵／高鐵 ----------
@@ -1128,12 +1152,14 @@
         </div>
         ${accessCard(t.walkOut, `從${stn(t.dest)}到目的地`, false)}
         ${coach ? coachCard(t) : fareCard(t)}
+        ${luggageCard(t.dest, `在${stn(t.dest)}`)}
         <p class="hint">${esc(r.date)} 的時刻，來自交通部 TDX，依抵達目的地時間排序。${coach
           ? '客運依時刻表，實際發車可能因路況延誤；沒有時刻表資料的路線不會列出，也可以開「🚌 公車」查附近的客運即時到站。'
           : !r.today
           ? `${r.system === 'tra' ? '誤點' : '剩餘座位'}只有當天才查得到；接駁的公車、YouBike 是現在的狀況，僅供參考。`
           : r.system === 'tra' ? '誤點資訊每 2 分鐘更新。' : '剩餘座位每 5 分鐘更新。'}</p>
       `);
+      fillLockers();
     }
 
     // ---------- 捷運／輕軌 ----------

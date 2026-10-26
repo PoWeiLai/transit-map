@@ -7,6 +7,7 @@ import { nearbyLots, costOf } from './vehicle.js';
 import { camerasAlong, warmUp as warmUpCameras } from './cameras.js';
 import { trafficIn } from './traffic.js';
 import { planCoach } from './coach.js';
+import { lockersNear } from './lockers.js';
 import { planRail, railStations, warmUp as warmUpRail } from './rail.js';
 import { tdx, hasTdx, taipeiNow } from './tdx.js';
 import { planMetro, metroMap } from './metro.js';
@@ -846,6 +847,13 @@ app.get('/api/rail', wrap(async (req, res) => {
   const when = parseWhen(req.query.date, req.query.time);
   if (when.error) return res.status(400).json({ error: when.error });
   res.json(await planRail(req.query.system === 'thsr' ? 'thsr' : 'tra', from, to, accessPrefs(req.query), when));
+}));
+
+// 寄放行李：某個地點（例如下車的車站、目的地）附近的置物櫃
+app.get('/api/lockers', wrap(async (req, res) => {
+  const near = parsePoint(req.query.near);
+  if (!near) return res.status(400).json({ error: '請提供地點' });
+  res.json(await lockersNear(near));
 }));
 
 // 長途客運：接駁到客運站（例如板橋 → 台北轉運站）→ 搭客運 → 接駁到目的地，依時刻表列出班次
