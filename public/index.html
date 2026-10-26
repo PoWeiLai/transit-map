@@ -283,7 +283,7 @@
 
     // ---------- 交通工具（可多選） ----------
     const TOOLS = {
-      walk: '🚶 步行', bike: '🚲 YouBike', bus: '🚌 公車／客運', metro: '🚇 捷運',
+      walk: '🚶 步行', bike: '🚲 YouBike', bus: '🚌 公車', coach: '🚍 客運', metro: '🚇 捷運',
       tra: '🚆 台鐵', thsr: '🚄 高鐵', car: '🚗 開車', moto: '🏍️ 騎機車', scooter: '🛵 共享機車', sharecar: '🚙 共享汽車', uber: '🚕 Uber',
     };
     const tools = new Set(['walk', 'bike', 'bus', 'metro']);
@@ -426,7 +426,7 @@
       if (tools.has('bike')) { if (!bikeInfo.getContainer()?.isConnected) bikeInfo.addTo(map); refreshBikes(); }
       else bikeInfo.remove();
       $('vehicleRow').hidden = !tools.has('scooter') && !tools.has('sharecar');
-      $('whenRow').hidden = !tools.has('tra') && !tools.has('thsr') && !tools.has('bus');
+      $('whenRow').hidden = !['tra', 'thsr', 'coach', 'bus'].some((t) => tools.has(t));
     }
     map.on('zoomend', applyTools);
 
@@ -515,7 +515,7 @@
     // 在這段可以用的工具（步行太遠、火車太近就不考慮）
     function legModes(leg) {
       const d = dist(leg.from, leg.to);
-      return [...tools].filter((t) => (t === 'walk' ? d <= 30000 : t === 'tra' || t === 'thsr' ? d >= RAIL_MIN_M : true));
+      return [...tools].filter((t) => (t === 'walk' ? d <= 30000 : ['tra', 'thsr', 'coach'].includes(t) ? d >= RAIL_MIN_M : true));
     }
 
     // 呼叫對應的規劃 API；choices 是使用者在這段選的借還車站等
@@ -531,17 +531,17 @@
         if ($('time').value || leg.depart != null) params.set('time', hm(leg.depart ?? 0));
         return api('/api/bus?' + params);
       }
-      if (['tra', 'thsr', 'metro'].includes(mode)) {
+      if (['tra', 'thsr', 'coach', 'metro'].includes(mode)) {
         // 到車站／出站後只用有開啟的工具；沒開步行時只有很近才走路。access／egress 是使用者在這段指定的方式
         params.set('allow', [tools.has('walk') && 'walk', tools.has('bike') && 'youbike', tools.has('bus') && 'bus', tools.has('metro') && 'metro', tools.has('uber') && 'uber'].filter(Boolean).join(','));
         set(['access', 'egress', 'inPickup', 'inDropoff', 'outPickup', 'outDropoff', 'board', 'alight']);
       }
       if (mode === 'metro') return api('/api/metro?' + params);
-      if (mode === 'tra' || mode === 'thsr') {
+      if (mode === 'tra' || mode === 'thsr' || mode === 'coach') {
         // 第二段之後的出發時間 = 前面各段走完的時間
         if ($('date').value) params.set('date', $('date').value);
         if ($('time').value || leg.depart != null) params.set('time', hm(leg.depart ?? 0));
-        return api(`/api/rail?system=${mode}&${params}`);
+        return api(mode === 'coach' ? `/api/coach?${params}` : `/api/rail?system=${mode}&${params}`);
       }
       if (VEHICLE[mode]) {
         params.set('kind', mode);
@@ -566,7 +566,7 @@
     function durationOf(mode, r) {
       if (mode === 'bus') return r.options[0]?.total.duration ?? null;
       if (mode === 'metro') return r.options[0]?.duration ?? null;
-      if (mode === 'tra' || mode === 'thsr') return r.trains[0] ? (r.trains[0].reach - r.now.minutes) * 60 : null;
+      if (mode === 'tra' || mode === 'thsr' || mode === 'coach') return r.trains[0] ? (r.trains[0].reach - r.now.minutes) * 60 : null;
       return r.total.duration;
     }
 
@@ -649,7 +649,7 @@
 
     const RENDER = {
       walk: (r, f, t) => renderWalk(r, f, t), bike: (r, f, t) => render(r, f, t), bus: (r, f, t) => renderBus(r, f, t),
-      metro: (r, f, t) => renderMetro(r, f, t), tra: (r, f, t) => renderRail(r, f, t), thsr: (r, f, t) => renderRail(r, f, t),
+      metro: (r, f, t) => renderMetro(r, f, t), tra: (r, f, t) => renderRail(r, f, t), thsr: (r, f, t) => renderRail(r, f, t), coach: (r, f, t) => renderRail(r, f, t),
       car: (r, f, t) => renderVehicle(r, f, t), moto: (r, f, t) => renderVehicle(r, f, t),
       scooter: (r, f, t) => renderVehicle(r, f, t), sharecar: (r, f, t) => renderVehicle(r, f, t), uber: (r, f, t) => renderDrive(r, f, t),
     };
@@ -1080,11 +1080,13 @@
       stopNav();
       layer.clearLayers();
 
+      const coach = r.system === 'coach';
+      const stn = (s) => (coach ? s.name : `${s.name}站`);
       const stages = [
-        ...accessStages(t.walkIn, t.origin, `${t.origin.name}站`,
-          `已到達${t.origin.name}站，請搭 ${t.type} ${t.no}（${t.dep} 開）`, true),
-        { leg: t.leg, from: t.origin, to: t.dest, icon: r.system === 'thsr' ? '🚄' : '🚆',
-          title: `${t.type} ${t.no}（${t.headsign}）到${t.dest.name}`, arrive: `到站了！請在${t.dest.name}站下車` },
+        ...accessStages(t.walkIn, t.origin, stn(t.origin),
+          `已到達${stn(t.origin)}，請搭 ${t.type} ${t.no}（${t.dep} 開）`, true),
+        { leg: t.leg, from: t.origin, to: t.dest, icon: r.system === 'thsr' ? '🚄' : coach ? '🚍' : '🚆',
+          title: `${t.type} ${t.no}（${t.headsign}）到${t.dest.name}`, arrive: `到站了！請在${stn(t.dest)}下車` },
         ...accessStages(t.walkOut, to, `目的地：${to.name}`, '🎉 已抵達目的地', false),
       ];
       current = { stages, from, to };
@@ -1114,9 +1116,9 @@
           <div class="card opt ${i === idx ? 'sel' : ''}" data-train="${i}">
             <div class="chips">${trainChip(x)} <b>${esc(x.dep)} → ${esc(x.arr)}</b> ${delay(x)}
               ${x.seats ? seatHtml(x.seats) : r.system === 'thsr' && r.today ? '<span class="muted">座位：無資料</span>' : ''}</div>
-            <div class="muted">${esc(x.origin.name)} → ${esc(x.dest.name)}・${x.minutes} 分・停 ${x.stopCount} 站${x.fare?.full.standard ? `・標準 ${price(x.fare.full.standard)}` : ''}・抵達目的地約 ${hhmm(x.reach)}</div>
+            <div class="muted">${esc(x.origin.name)} → ${esc(x.dest.name)}・${x.minutes} 分・停 ${x.stopCount} 站${x.fare?.full.standard ? `・標準 ${price(x.fare.full.standard)}` : ''}${x.coach?.fare ? `・全票 ${price(x.coach.fare.full[0])}${x.coach.fare.full[1] > x.coach.fare.full[0] ? '起' : ''}` : ''}・抵達目的地約 ${hhmm(x.reach)}</div>
           </div>`).join('') : '<div class="card muted">這個車種接下來沒有班次</div>'}
-        ${accessCard(t.walkIn, `到${t.origin.name}站`, true)}
+        ${accessCard(t.walkIn, `到${stn(t.origin)}`, true)}
         <div class="card">
           <h2>路線說明</h2>
           ${stages.map((st, i) => stageHtml(st, i, detail(st))).join('')}
@@ -1124,9 +1126,11 @@
           ${est}
           ${navButtons}
         </div>
-        ${accessCard(t.walkOut, `從${t.dest.name}站到目的地`, false)}
-        ${fareCard(t)}
-        <p class="hint">${esc(r.date)} 的時刻，來自交通部 TDX，依抵達目的地時間排序。${!r.today
+        ${accessCard(t.walkOut, `從${stn(t.dest)}到目的地`, false)}
+        ${coach ? coachCard(t) : fareCard(t)}
+        <p class="hint">${esc(r.date)} 的時刻，來自交通部 TDX，依抵達目的地時間排序。${coach
+          ? '客運依時刻表，實際發車可能因路況延誤；沒有時刻表資料的路線不會列出，也可以開「🚌 公車」查附近的客運即時到站。'
+          : !r.today
           ? `${r.system === 'tra' ? '誤點' : '剩餘座位'}只有當天才查得到；接駁的公車、YouBike 是現在的狀況，僅供參考。`
           : r.system === 'tra' ? '誤點資訊每 2 分鐘更新。' : '剩餘座位每 5 分鐘更新。'}</p>
       `);
@@ -1310,6 +1314,13 @@
     const price = (n) => `$${Number(n).toLocaleString('en-US')}`;
     const seatHtml = (s) => (s ? ['standard', 'business'].filter((k) => SEAT[s[k]])
       .map((k) => `<span class="seat ${s[k]}">${k === 'standard' ? '標準' : '商務'} ${SEAT[s[k]]}</span>`).join(' ') : '');
+
+    // 客運：票價、業者電話與官網、路線圖
+    function coachCard(t) {
+      const html = coachHtml({ coach: t.coach && { ...t.coach, next: [] } });
+      return html ? `<div class="card"><h2>💰 ${esc(t.type)} ${esc(t.no)}：${esc(t.origin.name)} → ${esc(t.dest.name)}</h2>${html}
+        <p class="hint">票價依分段計算（四排座／三排座、優惠時段價格不同），以業者公告為準；訂位請洽業者官網或電話。</p></div>` : '';
+    }
 
     function fareCard(t) {
       if (!t.fare) return '';

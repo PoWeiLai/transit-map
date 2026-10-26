@@ -6,6 +6,7 @@ import { warmUp as warmUpParking } from './scooter.js';
 import { nearbyLots, costOf } from './vehicle.js';
 import { camerasAlong, warmUp as warmUpCameras } from './cameras.js';
 import { trafficIn } from './traffic.js';
+import { planCoach } from './coach.js';
 import { planRail, railStations, warmUp as warmUpRail } from './rail.js';
 import { tdx, hasTdx, taipeiNow } from './tdx.js';
 import { planMetro, metroMap } from './metro.js';
@@ -845,6 +846,16 @@ app.get('/api/rail', wrap(async (req, res) => {
   const when = parseWhen(req.query.date, req.query.time);
   if (when.error) return res.status(400).json({ error: when.error });
   res.json(await planRail(req.query.system === 'thsr' ? 'thsr' : 'tra', from, to, accessPrefs(req.query), when));
+}));
+
+// 長途客運：接駁到客運站（例如板橋 → 台北轉運站）→ 搭客運 → 接駁到目的地，依時刻表列出班次
+app.get('/api/coach', wrap(async (req, res) => {
+  const from = parsePoint(req.query.from);
+  const to = parsePoint(req.query.to);
+  if (!from || !to) return res.status(400).json({ error: '請提供出發點與目的地' });
+  const when = parseWhen(req.query.date, req.query.time);
+  if (when.error) return res.status(400).json({ error: when.error });
+  res.json(await planCoach(from, to, accessPrefs(req.query), when));
 }));
 
 // 全台捷運／輕軌：接駁到車站 → 搭捷運（可轉乘） → 接駁到目的地

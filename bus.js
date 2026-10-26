@@ -329,6 +329,18 @@ function loadTimetables() {
     .catch((e) => console.log('客運時刻表載入失敗：', e.message));
 }
 
+// 客運規劃（coach.js）用：全部客運路線與時刻表；第一次下載還沒好時請使用者稍後再查
+export async function intercityData() {
+  if (!hasTdx()) throw new Error('伺服器尚未設定 TDX 金鑰，無法查詢客運');
+  const [net, tt] = await Promise.all([
+    within(getTdxNetwork(INTERCITY).catch(() => null), LOAD_WAIT_MS, null),
+    within(schedules().catch(() => null), LOAD_WAIT_MS, null),
+  ]);
+  if (!net || !tt) throw new Error('客運路線與時刻表第一次下載中（約一分鐘），請稍後再查一次');
+  if (!timetables) { timetables = tt; timetablesDate = taipeiNow().date; }
+  return { lines: [...net.lines.values()], timingOf };
+}
+
 // 一條客運路線依時刻表整理：offsets 是各站距第一站幾秒（典型值，算車程），trips 是每班車各站時間（算等車）
 function timingOf(line) {
   if (line.source !== INTERCITY || !timetables) return null;
