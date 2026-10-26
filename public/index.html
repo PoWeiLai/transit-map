@@ -1114,10 +1114,11 @@
         el.dataset.done = '1';
         const { kind, near } = el.dataset;
         const key = `${kind}@${near}`;
-        if (!nearbyCache.has(key)) nearbyCache.set(key, api(`/api/${NEARBY[kind].api}?near=${near}`).catch(() => null));
+        if (!nearbyCache.has(key) || kind === 'garbage') nearbyCache.set(key, api(`/api/${NEARBY[kind].api}?near=${near}`).catch(() => null));
         const r = await nearbyCache.get(key);
         if (!el.isConnected) continue; // 畫面已經換了
         el.innerHTML = r ? NEARBY[kind].render(r) : '<span class="muted">暫時查不到，請稍後再試，或用下面的連結在 Google 地圖查詢。</span>';
+        if (kind === 'garbage') watchGarbage(el, near);
       }
     }
 
@@ -1154,34 +1155,90 @@
     }
 
     function garbageHtml(r) {
-      for (const t of r.trucks) markNearby([{ ...t, name: `${t.car}・${t.location}` }], '🚛');
       markNearby(r.stops, '🗑️');
+      routeTruck = null; // 換地點查詢，之前打開的路線不算了
+      updateTrucks(r);
       if (!r.covered) return '<span class="muted">這附近的縣市沒有公開垃圾車資料（目前有：台北、新北、基隆、高雄的清運時間，以及新北、台中、台南、高雄的垃圾車即時位置），請洽當地清潔隊或環保局。</span>';
+      return `<div class="garbage-list">${garbageListHtml(r)}</div><div class="garbage-route"></div>
+        <p class="hint">「預計」是依垃圾車即時位置推算（目前只有新北）；高雄是環保局的今日預估；其他為表定時間，遇假日、颱風可能異動。</p>`;
+    }
+
+    // 會經過這裡的垃圾車：每條路線幾點經過、現在到哪；附近正在開的垃圾車
+    function garbageListHtml(r) {
+      const time = new Date(Date.now() + 8 * 3600000).toISOString().slice(11, 16);
       const stopsHtml = r.stops.length
-        ? r.stops.map((s) => item(`<b>${esc(s.when)}</b>${s.soon != null && s.soon >= 0 && s.soon <= 30 ? ' <span class="eta-now">快到了</span>' : ''}・${esc(s.name)}`,
+        ? `<p><b>會經過這裡的垃圾車（${r.stops.length} 條路線）</b></p>${r.stops.map((s) => item(`<b>${esc(s.when)}</b>${s.soon != null && s.soon >= 0 && s.soon <= 30 ? ' <span class="eta-now">快到了</span>' : ''}・${esc(s.name)}`,
           [s.progress && progressText(s.progress), [meters(s.distance), esc(s.route), s.end && `停到 ${esc(s.end)}`, s.note && esc(s.note)].filter(Boolean).join('・'),
-            `<button type="button" class="link" data-garbage-line="${esc(s.line)}" data-garbage-stop="${esc(s.name)}">看整條路線進度</button>`].filter(Boolean).join('<br>'))).join('')
+            `<button type="button" class="link" data-garbage-line="${esc(s.line)}" data-garbage-stop="${esc(s.name)}">看整條路線進度</button>`].filter(Boolean).join('<br>'))).join('')}`
         : '<span class="muted">600 公尺內沒有清運點資料。</span>';
       const trucks = r.trucks.length
-        ? `<p><b>🚛 附近的垃圾車現在位置</b></p>${r.trucks.map((t) => item(`${esc(t.location)}`, `${meters(t.distance)}・${t.ago ? `${t.ago} 分鐘前` : '剛剛'}回報・${esc(t.car)}`)).join('')}`
+        ? `<p><b>🚛 附近正在開的垃圾車</b></p>${r.trucks.map((t) => item(`${esc(t.location)}`, `${meters(t.distance)}・${t.ago ? `${t.ago} 分鐘前` : '剛剛'}回報・${esc(t.car)}`)).join('')}`
         : '';
-      return `${stopsHtml}${trucks}<div class="garbage-route"></div>
-        <p class="hint">「預計」是依垃圾車即時位置推算（目前只有新北）；高雄是環保局的今日預估；其他為表定時間，遇假日、颱風可能異動。</p>`;
+      const live = r.trucks.length || r.stops.some((x) => x.progress)
+        ? `<p class="hint">🔴 垃圾車位置每 30 秒自動更新（${time} 更新），地圖上的 🚛 會跟著移動。</p>`
+        : '<p class="hint">附近現在沒有正在開的垃圾車（還沒出車或已收班），出車後會自動顯示在地圖上。</p>';
+      return stopsHtml + trucks + live;
+    }
+
+    // 地圖上的垃圾車：同一台車只移動位置，不重畫
+    const truckLayer = L.layerGroup().addTo(map);
+    const truckMarkers = new Map();
+    const truckIcon = L.divIcon({ className: '', html: '<div style="font-size:26px;filter:drop-shadow(0 1px 2px #0008)">🚛</div>', iconSize: [30, 30], iconAnchor: [15, 15] });
+    let lastGarbage = null, routeTruck = null; // 最近一次查詢結果、打開的整條路線上的垃圾車
+    function updateTrucks(r) {
+      lastGarbage = r;
+      if (!r) routeTruck = null;
+      const all = new Map();
+      if (routeTruck) all.set(routeTruck.car, routeTruck);
+      for (const t of r?.trucks || []) all.set(t.car, t);
+      for (const st of r?.stops || []) if (st.progress) all.set(st.progress.car, { ...st.progress, route: st.route });
+      for (const [car, t] of all) {
+        const text = `🚛 ${esc(car)}${t.route ? `（${esc(t.route)}）` : ''}<br>${esc(t.location || '')}<br>${t.ago ? `${t.ago} 分鐘前` : '剛剛'}回報`;
+        const m = truckMarkers.get(car);
+        if (m) m.setLatLng([t.lat, t.lng]).setPopupContent(text);
+        else truckMarkers.set(car, L.marker([t.lat, t.lng], { icon: truckIcon, zIndexOffset: 1000 }).bindPopup(text).addTo(truckLayer));
+      }
+      for (const [car, m] of truckMarkers) if (!all.has(car)) { m.remove(); truckMarkers.delete(car); }
+    }
+
+    // 垃圾車結果顯示時，每 30 秒更新位置與進度；畫面換掉就停
+    let garbageTimer = null;
+    function watchGarbage(el, near) {
+      clearInterval(garbageTimer);
+      garbageTimer = setInterval(async () => {
+        if (!el.isConnected) { clearInterval(garbageTimer); updateTrucks(null); return; }
+        const r = await api(`/api/garbage?near=${near}`).catch(() => null);
+        if (!r || !el.isConnected) return;
+        updateTrucks(r);
+        const list = el.querySelector('.garbage-list');
+        if (list) list.innerHTML = garbageListHtml(r);
+        const box = el.querySelector('.garbage-route[data-line]');
+        if (box) refreshGarbageRoute(box);
+      }, 30000);
     }
 
     // 整條路線：每一站的表定時間，標出垃圾車現在在哪、你查的是哪一站
     async function showGarbageRoute(btn) {
       const box = btn.closest('.nearby').querySelector('.garbage-route');
+      box.dataset.line = btn.dataset.garbageLine;
+      box.dataset.stop = btn.dataset.garbageStop;
       box.innerHTML = '<span class="muted">查詢中…</span>';
-      let r;
-      try { r = await api('/api/garbage/route?line=' + encodeURIComponent(btn.dataset.garbageLine)); } catch (e) { box.innerHTML = `<span class="muted">${esc(e.message)}</span>`; return; }
-      const g = r.progress;
-      layer.clearLayers();
-      L.polyline(r.stops.map((s) => [s.lat, s.lng]), { color: '#16a34a', weight: 4, opacity: 0.7 }).addTo(layer);
-      if (g) L.marker([g.lat, g.lng], { icon: L.divIcon({ className: '', html: '<div style="font-size:26px">🚛</div>', iconSize: [28, 28] }) }).bindPopup(esc(g.location)).addTo(layer).openPopup();
-      box.innerHTML = `<h3>${esc(r.route)}</h3>${g ? `<p>${progressText({ ...g, left: 1 }).replace(/，還有.*$/, '')}</p>` : '<p class="muted">這條路線現在沒有垃圾車的即時位置（還沒出車、已收班，或這個縣市沒有即時資料）。</p>'}
-        <ol class="garbage-stops">${r.stops.map((s, k) => `<li class="${g && k < g.atIndex ? 'muted' : ''}">${esc(s.start)}　${esc(s.name)}${g && k === g.atIndex ? ' <b>🚛 垃圾車在這</b>' : ''}${s.name === btn.dataset.garbageStop ? ' <b>📍 你查的</b>' : ''}</li>`).join('')}</ol>`;
+      await refreshGarbageRoute(box, true);
       box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    async function refreshGarbageRoute(box, first = false) {
+      let r;
+      try { r = await api('/api/garbage/route?line=' + encodeURIComponent(box.dataset.line)); } catch (e) { box.innerHTML = `<span class="muted">${esc(e.message)}</span>`; return; }
+      const g = r.progress;
+      if (first) {
+        layer.clearLayers();
+        L.polyline(r.stops.map((x) => [x.lat, x.lng]), { color: '#16a34a', weight: 4, opacity: 0.7 }).addTo(layer);
+      }
+      // 這條路線的垃圾車就算離你很遠也標出來
+      routeTruck = g ? { ...g, route: r.route } : null;
+      updateTrucks(lastGarbage);
+      box.innerHTML = `<h3>${esc(r.route)}</h3>${g ? `<p>${progressText({ ...g, left: 1 }).replace(/，還有.*$/, '')}</p>` : '<p class="muted">這條路線現在沒有垃圾車的即時位置（還沒出車、已收班，或這個縣市沒有即時資料）。</p>'}
+        <ol class="garbage-stops">${r.stops.map((x, k) => `<li class="${g && k < g.atIndex ? 'muted' : ''}">${esc(x.start)}　${esc(x.name)}${g && k === g.atIndex ? ' <b>🚛 垃圾車在這</b>' : ''}${x.name === box.dataset.stop ? ' <b>📍 你查的</b>' : ''}</li>`).join('')}</ol>`;
     }
     $('out').addEventListener('click', (e) => {
       const b = e.target.closest('button[data-garbage-line]');
