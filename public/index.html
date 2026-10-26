@@ -80,6 +80,7 @@
     .tabs button.on { background:var(--fg); color:var(--bg); border-color:var(--fg); font-weight:600; }
     .tabs button.svc { border:2px solid #f59e0b; font-weight:600; }
     body.lookup .route-only { display:none !important; }
+    button.link { background:none; border:none; padding:0 4px; color:#2563eb; text-decoration:underline; cursor:pointer; font:inherit; }
     .tabs button.svc.on { background:#f59e0b; color:#111; border-color:#f59e0b; }
     .nearby-item { padding:4px 0; border-bottom:1px solid var(--line, #e5e7eb); }
     .nearby-item:last-child { border-bottom:none; }
@@ -442,7 +443,11 @@
       }
       document.body.classList.toggle('lookup', services.length > 0);
       $('lookupRow').hidden = !services.length;
-      $('placeLabel').textContent = `要查哪裡的${services.map((k) => SERVICES[k].split(' ')[1]).join('、')}`;
+      // 公廁、寄物是從出發地找最近的；垃圾車是查某個地方幾點會來
+      const names = services.map((k) => SERVICES[k].split(' ')[1]).join('、');
+      $('placeLabel').textContent = services.every((k) => k === 'garbage')
+        ? '要查哪裡的垃圾車（不填就用目前位置）'
+        : `出發地（不填就用目前位置），找最近的${names}`;
       const show = (lyr, on) => (on ? lyr.addTo(map) : lyr.remove());
       show(metroLines, tools.has('metro'));
       show(metroStops, tools.has('metro') && map.getZoom() >= METRO_STOP_ZOOM);
@@ -1088,6 +1093,8 @@
     const nearbyCache = new Map();
     const nearbyLayer = L.layerGroup().addTo(map);
     const item = (main, sub) => `<div class="nearby-item">${main}${sub ? `<br><span class="muted">${sub}</span>` : ''}</div>`;
+    // 帶我去：把這個地點當目的地，從出發地規劃路線
+    const goButton = (x, name) => ` <button type="button" class="link" data-go="${x.lat},${x.lng}" data-go-name="${esc(name)}">🚶 帶我去</button>`;
     const meters = (d) => (d >= 1000 ? `${(d / 1000).toFixed(1)} 公里` : `${d} 公尺`);
 
     function nearbyPanel(p, services, where = '目的地') {
@@ -1126,14 +1133,14 @@
     function lockersHtml(list) {
       markNearby(list, '🧳');
       return list.length
-        ? list.map((l) => item(esc(l.name), [meters(l.distance), l.hours && esc(l.hours), l.fee && esc(l.fee)].filter(Boolean).join('・'))).join('')
+        ? list.map((l) => item(esc(l.name) + goButton(l, l.name), [meters(l.distance), l.hours && esc(l.hours), l.fee && esc(l.fee)].filter(Boolean).join('・'))).join('')
         : '<span class="muted">附近沒有公開的置物櫃資料（台鐵、捷運沒有公開），大車站多半有置物櫃或行李房，可以用下面的連結查詢。</span>';
     }
 
     function toiletsHtml(r) {
       markNearby(r.toilets, '🚻');
       const list = r.toilets.length
-        ? r.toilets.map((t) => item(`${esc(t.name)}${t.grade ? `<span class="muted">（${esc(t.grade)}）</span>` : ''}`,
+        ? r.toilets.map((t) => item(`${esc(t.name)}${t.grade ? `<span class="muted">（${esc(t.grade)}）</span>` : ''}${goButton(t, t.address || t.name)}`,
           [meters(t.distance), t.address && esc(t.address), t.type && esc(t.type), t.hours && esc(t.hours), t.diaper && '有尿布台'].filter(Boolean).join('・'))).join('')
         : '<span class="muted">附近 5 公里內沒有公廁資料，可以用下面的連結查詢，或找附近的超商、加油站、捷運站。</span>';
       return list + (r.source === 'osm' ? '<p class="hint">目前用 OpenStreetMap 的公廁資料，可能不完整。</p>' : '<p class="hint">資料來源：環境部全國公廁建檔資料。</p>');
@@ -1179,7 +1186,29 @@
     $('out').addEventListener('click', (e) => {
       const b = e.target.closest('button[data-garbage-line]');
       if (b) showGarbageRoute(b);
+      const go = e.target.closest('button[data-go]');
+      if (go) {
+        const [lat, lng] = go.dataset.go.split(',').map(Number);
+        goTo({ lat, lng, name: go.dataset.goName });
+      }
     });
+
+    // 從查附近的出發地，規劃到選的公廁／置物櫃（回到規劃路線，至少開步行）
+    function goTo(dest) {
+      const from = placePoint;
+      for (const k of Object.keys(SERVICES)) tools.delete(k);
+      tools.add('walk');
+      try { localStorage.setItem('tools', JSON.stringify([...tools])); } catch { /* 無法儲存就算了 */ }
+      applyTools();
+      if (from) { points.from = from; $('from').value = from.name; }
+      while (stops.length > 1) { stops.at(-1).row.remove(); stops.pop(); }
+      if (!stops.length) addStop();
+      stops[0].el.value = dest.name;
+      stops[0].point = dest;
+      refreshStops();
+      resetChoices();
+      plan();
+    }
 
     // 查某個地方附近（沒填就是目前位置）
     let placePoint = null;
