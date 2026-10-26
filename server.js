@@ -8,6 +8,8 @@ import { camerasAlong, warmUp as warmUpCameras } from './cameras.js';
 import { trafficIn } from './traffic.js';
 import { planCoach } from './coach.js';
 import { lockersNear } from './lockers.js';
+import { toiletsNear, warmUp as warmUpToilets } from './toilets.js';
+import { garbageNear, warmUp as warmUpGarbage } from './garbage.js';
 import { planRail, railStations, warmUp as warmUpRail } from './rail.js';
 import { tdx, hasTdx, taipeiNow } from './tdx.js';
 import { planMetro, metroMap } from './metro.js';
@@ -856,6 +858,20 @@ app.get('/api/lockers', wrap(async (req, res) => {
   res.json(await lockersNear(near));
 }));
 
+// 附近的公廁
+app.get('/api/toilets', wrap(async (req, res) => {
+  const near = parsePoint(req.query.near);
+  if (!near) return res.status(400).json({ error: '請提供地點' });
+  res.json(await toiletsNear(near));
+}));
+
+// 附近的垃圾車清運點（表定經過時間）與垃圾車即時位置
+app.get('/api/garbage', wrap(async (req, res) => {
+  const near = parsePoint(req.query.near);
+  if (!near) return res.status(400).json({ error: '請提供地點' });
+  res.json(await garbageNear(near));
+}));
+
 // 長途客運：接駁到客運站（例如板橋 → 台北轉運站）→ 搭客運 → 接駁到目的地，依時刻表列出班次
 app.get('/api/coach', wrap(async (req, res) => {
   const from = parsePoint(req.query.from);
@@ -910,6 +926,12 @@ app.listen(PORT, () => {
   warmUpParking()
     .then(([lots]) => console.log(`已載入 ${lots.length} 個有機車格的停車場`))
     .catch((e) => console.log('停車場資料載入失敗：', e.message));
+  warmUpToilets()
+    .then((list) => console.log(`已載入 ${list.length} 個公廁`))
+    .catch((e) => console.log('公廁資料載入失敗：', e.message));
+  warmUpGarbage()
+    .then((list) => console.log(`已載入 ${list.length} 個垃圾車清運點`))
+    .catch((e) => console.log('垃圾車資料載入失敗：', e.message));
   console.log(`已載入 ${exits.length} 個捷運出口`);
   const t = Date.now();
   warmUp()

@@ -78,6 +78,10 @@
     .filters button { padding:4px 10px; font-size:13px; border-radius:999px; }
     .filters button.on { background:var(--fg); color:var(--bg); }
     .tabs button.on { background:var(--fg); color:var(--bg); border-color:var(--fg); font-weight:600; }
+    .tabs button.svc { border:2px solid #f59e0b; font-weight:600; }
+    .tabs button.svc.on { background:#f59e0b; color:#111; border-color:#f59e0b; }
+    .nearby-item { padding:4px 0; border-bottom:1px solid var(--line, #e5e7eb); }
+    .nearby-item:last-child { border-bottom:none; }
     .bikeinfo { background:var(--card); color:var(--fg); padding:6px 9px; border-radius:8px; font-size:12px; line-height:1.5;
                 box-shadow:0 1px 4px rgba(0,0,0,.3); max-width:190px; }
     .bikeinfo .legend { margin-top:3px; }
@@ -286,12 +290,16 @@
       walk: '🚶 步行', bike: '🚲 YouBike', bus: '🚌 公車', coach: '🚍 客運', metro: '🚇 捷運',
       tra: '🚆 台鐵', thsr: '🚄 高鐵', car: '🚗 開車', moto: '🏍️ 騎機車', scooter: '🛵 共享機車', sharecar: '🚙 共享汽車', uber: '🚕 Uber',
     };
+    // 附近找（不是交通工具）：查目的地附近的置物櫃、公廁、垃圾車；只開這些時就只查附近
+    const SERVICES = { luggage: '🧳 寄物', toilet: '🚻 公廁', garbage: '🚛 垃圾車' };
+    const isService = (t) => t in SERVICES;
     const tools = new Set(['walk', 'bike', 'bus', 'metro']);
     try { // 記住上次開的工具（只存在這台裝置）
       const saved = JSON.parse(localStorage.getItem('tools'));
-      if (Array.isArray(saved) && saved.length) { tools.clear(); saved.filter((t) => TOOLS[t]).forEach((t) => tools.add(t)); }
+      if (Array.isArray(saved) && saved.length) { tools.clear(); saved.filter((t) => TOOLS[t] || SERVICES[t]).forEach((t) => tools.add(t)); }
     } catch { /* 無法讀取就用預設 */ }
-    $('tools').innerHTML = Object.entries(TOOLS).map(([k, v]) => `<button type="button" data-tool="${k}">${v}</button>`).join('');
+    $('tools').innerHTML = [...Object.entries(TOOLS), ...Object.entries(SERVICES)]
+      .map(([k, v]) => `<button type="button" data-tool="${k}"${isService(k) ? ' class="svc"' : ''}>${v}</button>`).join('');
 
     // ---------- 要去的地方（可以多個） ----------
     const stops = []; // { el: input, point }
@@ -515,7 +523,7 @@
     // 在這段可以用的工具（步行太遠、火車太近就不考慮）
     function legModes(leg) {
       const d = dist(leg.from, leg.to);
-      return [...tools].filter((t) => (t === 'walk' ? d <= 30000 : ['tra', 'thsr', 'coach'].includes(t) ? d >= RAIL_MIN_M : true));
+      return [...tools].filter((t) => !isService(t)).filter((t) => (t === 'walk' ? d <= 30000 : ['tra', 'thsr', 'coach'].includes(t) ? d >= RAIL_MIN_M : true));
     }
 
     // 呼叫對應的規劃 API；choices 是使用者在這段選的借還車站等
@@ -590,7 +598,11 @@
       $('trip').innerHTML = '';
       show('<div class="card muted">規劃中…</div>');
       try {
-        if (!tools.size) throw new Error('請至少開啟一種交通工具');
+        const services = [...tools].filter(isService);
+        if (tools.size === services.length) {
+          if (!services.length) throw new Error('請至少開啟一種交通工具');
+          return await searchNearby(services);
+        }
         const from = await resolve('from');
         const filled = stops.filter((s) => s.el.value.trim() || s.point);
         if (!filled.length) throw new Error('請輸入要去的地方');
@@ -667,6 +679,9 @@
         RENDER[leg.mode](res.r, leg.from, leg.to);
       }
       bikeNotice(leg);
+      const services = [...tools].filter(isService);
+      if (services.length) $('out').insertAdjacentHTML('beforeend', nearbyPanel(leg.to, services));
+      else nearbyLayer.clearLayers();
       // 每段的結果下面都可以直接叫車；選了日期時間時，Uber 連結帶不了時間，提醒在 App 裡預約
       const when = !$('whenRow').hidden && ($('date').value || $('time').value)
         ? `${$('date').value || '今天'} ${$('time').value}`.trim() : '';
@@ -678,6 +693,7 @@
           ${when ? `<p class="hint"><b>要 ${esc(when)} 搭車：</b>開啟後在 Uber App 按「預約」（Reserve）選時間，上下車地點會自動帶入。</p>` : ''}
           <p class="hint">會開啟 Uber App（沒裝則開網頁版），車資與到達時間以 Uber 顯示為準。</p></div>`);
       }
+      fillNearby();
     }
 
     // 開了 YouBike 但這段的起點附近 1 公里內都沒車（例如夜間暫停服務）：說明為什麼沒安排騎車
@@ -1047,32 +1063,99 @@
           ${navButtons}
         </div>
         ${nearbyHtml(r.nearby)}
-        ${luggageCard(to, '在目的地附近')}
         <p class="hint">時間含等車的估計值；到站時間每 30 秒更新，重新規劃即可取得最新資訊。</p>
       `);
-      fillLockers();
     }
 
-    // ---------- 寄放行李 ----------
-    // 附近的置物櫃（OpenStreetMap，只有部分地點）＋ Google 地圖搜尋，大車站多半有置物櫃或行李房
-    const lockerCache = new Map();
-    function luggageCard(p, where) {
+    // ---------- 附近找：寄物、公廁、垃圾車 ----------
+    // 置物櫃：OpenStreetMap（只有部分地點）；公廁：環境部建檔公廁（或 OpenStreetMap）；
+    // 垃圾車：有公開資料的縣市的清運點與表定經過時間＋即時位置。都附 Google 地圖搜尋
+    const NEARBY = {
+      luggage: { title: '🧳 寄放行李', api: 'lockers', search: '置物櫃 寄物', render: lockersHtml },
+      toilet: { title: '🚻 公廁', api: 'toilets', search: '公廁', render: toiletsHtml },
+      garbage: { title: '🚛 垃圾車', api: 'garbage', search: '垃圾車 清運點', render: garbageHtml },
+    };
+    const nearbyCache = new Map();
+    const nearbyLayer = L.layerGroup().addTo(map);
+    const item = (main, sub) => `<div class="nearby-item">${main}${sub ? `<br><span class="muted">${sub}</span>` : ''}</div>`;
+    const meters = (d) => (d >= 1000 ? `${(d / 1000).toFixed(1)} 公里` : `${d} 公尺`);
+
+    function nearbyPanel(p, services, where = '目的地') {
+      nearbyLayer.clearLayers();
       const q = `${p.lat.toFixed(5)},${p.lng.toFixed(5)}`;
-      const g = `https://www.google.com/maps/search/${encodeURIComponent('置物櫃 寄物')}/@${q},16z`;
-      return `<div class="card"><h2>🧳 ${esc(where)}寄放行李</h2>
-        <div class="lockers" data-near="${q}"><span class="muted">查詢附近置物櫃…</span></div>
-        <div class="links"><a target="_blank" rel="noopener" href="${g}">🔎 在 Google 地圖找附近置物櫃、寄物服務</a></div></div>`;
+      return services.map((k) => {
+        const n = NEARBY[k];
+        const g = `https://www.google.com/maps/search/${encodeURIComponent(n.search)}/@${q},16z`;
+        return `<div class="card"><h2>${n.title}・${esc(where)}附近</h2>
+          <div class="nearby" data-kind="${k}" data-near="${q}"><span class="muted">查詢中…</span></div>
+          <div class="links"><a target="_blank" rel="noopener" href="${g}">🔎 在 Google 地圖找附近${esc(n.search.split(' ')[0])}</a></div></div>`;
+      }).join('');
     }
-    async function fillLockers() {
-      for (const el of document.querySelectorAll('.lockers[data-near]')) {
-        const q = el.dataset.near;
-        if (!lockerCache.has(q)) lockerCache.set(q, api('/api/lockers?near=' + q).catch(() => []));
-        const list = await lockerCache.get(q);
+
+    async function fillNearby() {
+      for (const el of document.querySelectorAll('.nearby[data-near]:not([data-done])')) {
+        el.dataset.done = '1';
+        const { kind, near } = el.dataset;
+        const key = `${kind}@${near}`;
+        if (!nearbyCache.has(key)) nearbyCache.set(key, api(`/api/${NEARBY[kind].api}?near=${near}`).catch(() => null));
+        const r = await nearbyCache.get(key);
         if (!el.isConnected) continue; // 畫面已經換了
-        el.innerHTML = list.length
-          ? list.map((l) => `<div>${esc(l.name)}<span class="muted">・${l.distance} 公尺${l.hours ? `・${esc(l.hours)}` : ''}${l.fee ? `・${esc(l.fee)}` : ''}</span></div>`).join('')
-          : '<span class="muted">附近沒有公開的置物櫃資料，可以用下面的連結在 Google 地圖查詢。</span>';
+        el.innerHTML = r ? NEARBY[kind].render(r) : '<span class="muted">暫時查不到，請稍後再試，或用下面的連結在 Google 地圖查詢。</span>';
       }
+    }
+
+    // 地圖上標出附近的點
+    function markNearby(list, icon) {
+      for (const x of list) {
+        if (x.lat == null) continue;
+        L.marker([x.lat, x.lng], { icon: L.divIcon({ className: '', html: `<div style="font-size:20px">${icon}</div>`, iconSize: [24, 24] }) })
+          .bindPopup(esc(x.name || '')).addTo(nearbyLayer);
+      }
+    }
+
+    function lockersHtml(list) {
+      markNearby(list, '🧳');
+      return list.length
+        ? list.map((l) => item(esc(l.name), [meters(l.distance), l.hours && esc(l.hours), l.fee && esc(l.fee)].filter(Boolean).join('・'))).join('')
+        : '<span class="muted">附近沒有公開的置物櫃資料（台鐵、捷運沒有公開），大車站多半有置物櫃或行李房，可以用下面的連結查詢。</span>';
+    }
+
+    function toiletsHtml(r) {
+      markNearby(r.toilets, '🚻');
+      const list = r.toilets.length
+        ? r.toilets.map((t) => item(`${esc(t.name)}${t.grade ? `<span class="muted">（${esc(t.grade)}）</span>` : ''}`,
+          [meters(t.distance), t.address && esc(t.address), t.type && esc(t.type), t.hours && esc(t.hours), t.diaper && '有尿布台'].filter(Boolean).join('・'))).join('')
+        : '<span class="muted">800 公尺內沒有公廁資料，可以用下面的連結查詢，或找附近的超商、加油站、捷運站。</span>';
+      return list + (r.source === 'osm' ? '<p class="hint">目前用 OpenStreetMap 的公廁資料，可能不完整。</p>' : '<p class="hint">資料來源：環境部全國公廁建檔資料。</p>');
+    }
+
+    function garbageHtml(r) {
+      if (!r.covered) return '<span class="muted">這附近的縣市沒有公開垃圾車資料（目前有：台北、新北、基隆、高雄的清運時間，以及新北、台中、台南、高雄的垃圾車即時位置），請洽當地清潔隊或環保局。</span>';
+      const stopsHtml = r.stops.length
+        ? r.stops.map((s) => item(`<b>${esc(s.when)}</b>${s.soon != null && s.soon >= 0 && s.soon <= 30 ? ' <span class="eta-now">快到了</span>' : ''}・${esc(s.name)}`,
+          [meters(s.distance), esc(s.route), s.end && `停到 ${esc(s.end)}`, s.note && esc(s.note)].filter(Boolean).join('・'))).join('')
+        : '<span class="muted">600 公尺內沒有清運點資料。</span>';
+      const trucks = r.trucks.length
+        ? `<p><b>🚛 附近的垃圾車現在位置</b></p>${r.trucks.map((t) => item(`${esc(t.location)}`, `${meters(t.distance)}・${t.ago ? `${t.ago} 分鐘前` : '剛剛'}回報・${esc(t.car)}`)).join('')}`
+        : '';
+      return stopsHtml + trucks + '<p class="hint">時間為環保局表定（高雄有今天的預估時間），遇假日、颱風可能異動。</p>';
+    }
+
+    // 只開附近找時：查每個目的地附近；沒填目的地就查出發點（沒填就是目前位置）
+    async function searchNearby(services) {
+      trip = null;
+      stopNav();
+      layer.clearLayers();
+      const filled = stops.filter((s) => s.el.value.trim() || s.point);
+      const places = [];
+      if (filled.length) for (const s of filled) places.push(await resolveStop(s));
+      else places.push(await resolve('from'));
+      tripLayer.clearLayers();
+      show(places.map((p) => `<h2>📍 ${placeName(p)}</h2>${nearbyPanel(p, services, p.name === '目前位置' ? '目前位置' : '這裡')}`).join(''));
+      map.setView([places[0].lat, places[0].lng], 16);
+      for (const p of places) L.marker([p.lat, p.lng], { icon: pin('#dc2626', '📍') }).bindPopup(esc(p.name)).addTo(tripLayer);
+      fillNearby();
+      if (isPhone()) setFormHidden(true);
     }
 
     // ---------- 台鐵／高鐵 ----------
@@ -1152,14 +1235,12 @@
         </div>
         ${accessCard(t.walkOut, `從${stn(t.dest)}到目的地`, false)}
         ${coach ? coachCard(t) : fareCard(t)}
-        ${luggageCard(t.dest, `在${stn(t.dest)}`)}
         <p class="hint">${esc(r.date)} 的時刻，來自交通部 TDX，依抵達目的地時間排序。${coach
           ? '客運依時刻表，實際發車可能因路況延誤；沒有時刻表資料的路線不會列出，也可以開「🚌 公車」查附近的客運即時到站。'
           : !r.today
           ? `${r.system === 'tra' ? '誤點' : '剩餘座位'}只有當天才查得到；接駁的公車、YouBike 是現在的狀況，僅供參考。`
           : r.system === 'tra' ? '誤點資訊每 2 分鐘更新。' : '剩餘座位每 5 分鐘更新。'}</p>
       `);
-      fillLockers();
     }
 
     // ---------- 捷運／輕軌 ----------
