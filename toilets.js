@@ -6,7 +6,7 @@ import { distance } from './geo.js';
 const MOENV = 'https://data.moenv.gov.tw/api/v2/fac_p_07';
 const PAGE = 1000;
 const OVERPASS = 'https://overpass-api.de/api/interpreter';
-const NEAR_M = 800;
+const NEAR_M = 5000; // 列出最近的幾個，太遠（5 公里外）就不列
 const LIMIT = 6;
 
 async function fromMoenv(key) {

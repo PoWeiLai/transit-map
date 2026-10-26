@@ -79,6 +79,7 @@
     .filters button.on { background:var(--fg); color:var(--bg); }
     .tabs button.on { background:var(--fg); color:var(--bg); border-color:var(--fg); font-weight:600; }
     .tabs button.svc { border:2px solid #f59e0b; font-weight:600; }
+    body.lookup .route-only { display:none !important; }
     .tabs button.svc.on { background:#f59e0b; color:#111; border-color:#f59e0b; }
     .nearby-item { padding:4px 0; border-bottom:1px solid var(--line, #e5e7eb); }
     .nearby-item:last-child { border-bottom:none; }
@@ -150,10 +151,19 @@
     <button type="button" id="formToggle">▲ 收起出發點、目的地</button>
     <form id="form">
       <div>
-        <label>交通工具（點一下開／關，可以多選）</label>
+        <label>交通工具（點一下開／關，可以多選）・橘色是查附近</label>
         <div class="tabs" id="tools"></div>
       </div>
-      <div>
+      <div id="lookupRow" hidden>
+        <label for="place" id="placeLabel">要查哪裡</label>
+        <div class="row">
+          <input id="place" placeholder="不填就查目前位置附近" />
+          <button type="button" id="placeLocate" title="使用目前位置">📍</button>
+        </div>
+        <p class="ex" data-for="place">例如：<button type="button">板橋車站</button><button type="button">台北101</button><button type="button">高雄車站</button>・按 📍 或不填就用目前位置</p>
+        <button class="primary" type="submit">查詢</button>
+      </div>
+      <div class="route-only">
         <label for="from">出發點</label>
         <div class="row">
           <input id="from" placeholder="不填就從目前位置出發" />
@@ -161,7 +171,7 @@
         </div>
         <p class="ex" data-for="from">例如：<button type="button">捷運科技大樓站</button><button type="button">台北車站</button><button type="button">板橋車站</button>・按 📍 用目前位置</p>
       </div>
-      <div id="vehicleRow" hidden>
+      <div id="vehicleRow" class="route-only" hidden>
         <label for="vehicle">取車位置（選填）：先在 GoShare／WeMo／iRent App 找到車，再填車子停的地址</label>
         <input id="vehicle" placeholder="車子停的地址，或點地圖 →「設為取車位置」" />
         <p class="ex" data-for="vehicle">例如：<button type="button">信義路五段7號</button><button type="button">忠孝東路四段1號</button>・不填就從出發點開始騎</p>
@@ -171,14 +181,14 @@
           <a target="_blank" rel="noopener" href="https://www.irentcar.com.tw/">🚙 開啟 iRent</a>
         </div>
       </div>
-      <div id="whenRow" hidden>
+      <div id="whenRow" class="route-only" hidden>
         <div class="row">
           <div style="flex:1"><label for="date">乘車日期</label><input id="date" type="date" /></div>
           <div style="flex:1"><label for="time">出發時間</label><input id="time" type="time" /></div>
         </div>
         <p class="ex">列出這個時間之後的班次・不填就是現在 <button type="button" id="whenNow">改回現在</button></p>
       </div>
-      <div>
+      <div class="route-only">
         <label>要去的地方</label>
         <div id="stops"></div>
         <button type="button" id="addStop">＋ 新增地點</button>
@@ -188,8 +198,8 @@
           <label class="check"><input type="checkbox" id="roundTrip" /> 最後回到出發點</label>
         </div>
       </div>
-      <button class="primary" type="submit">規劃路線</button>
-      <p class="hint">也可以直接點地圖設定出發點或加入地點。</p>
+      <button class="primary route-only" type="submit">規劃路線</button>
+      <p class="hint route-only">也可以直接點地圖設定出發點或加入地點。</p>
     </form>
     <div id="trip"></div>
     <div id="out"></div>
@@ -425,7 +435,14 @@
 
     // 地圖只顯示有開啟的交通工具，表單也只顯示用得到的欄位
     function applyTools() {
-      for (const b of $('tools').children) b.classList.toggle('on', tools.has(b.dataset.tool));
+      const services = [...tools].filter(isService);
+      for (const b of $('tools').children) {
+        // 查附近時，交通工具顯示為沒開（按了就回到規劃路線）
+        b.classList.toggle('on', tools.has(b.dataset.tool) && (isService(b.dataset.tool) || !services.length));
+      }
+      document.body.classList.toggle('lookup', services.length > 0);
+      $('lookupRow').hidden = !services.length;
+      $('placeLabel').textContent = `要查哪裡的${services.map((k) => SERVICES[k].split(' ')[1]).join('、')}`;
       const show = (lyr, on) => (on ? lyr.addTo(map) : lyr.remove());
       show(metroLines, tools.has('metro'));
       show(metroStops, tools.has('metro') && map.getZoom() >= METRO_STOP_ZOOM);
@@ -598,11 +615,7 @@
       $('trip').innerHTML = '';
       show('<div class="card muted">規劃中…</div>');
       try {
-        const services = [...tools].filter(isService);
-        if (tools.size === services.length) {
-          if (!services.length) throw new Error('請至少開啟一種交通工具');
-          return await searchNearby(services);
-        }
+        if (![...tools].some((t) => !isService(t))) throw new Error('請至少開啟一種交通工具');
         const from = await resolve('from');
         const filled = stops.filter((s) => s.el.value.trim() || s.point);
         if (!filled.length) throw new Error('請輸入要去的地方');
@@ -679,9 +692,7 @@
         RENDER[leg.mode](res.r, leg.from, leg.to);
       }
       bikeNotice(leg);
-      const services = [...tools].filter(isService);
-      if (services.length) $('out').insertAdjacentHTML('beforeend', nearbyPanel(leg.to, services));
-      else nearbyLayer.clearLayers();
+      nearbyLayer.clearLayers();
       // 每段的結果下面都可以直接叫車；選了日期時間時，Uber 連結帶不了時間，提醒在 App 裡預約
       const when = !$('whenRow').hidden && ($('date').value || $('time').value)
         ? `${$('date').value || '今天'} ${$('time').value}`.trim() : '';
@@ -693,7 +704,6 @@
           ${when ? `<p class="hint"><b>要 ${esc(when)} 搭車：</b>開啟後在 Uber App 按「預約」（Reserve）選時間，上下車地點會自動帶入。</p>` : ''}
           <p class="hint">會開啟 Uber App（沒裝則開網頁版），車資與到達時間以 Uber 顯示為準。</p></div>`);
       }
-      fillNearby();
     }
 
     // 開了 YouBike 但這段的起點附近 1 公里內都沒車（例如夜間暫停服務）：說明為什麼沒安排騎車
@@ -1125,35 +1135,67 @@
       const list = r.toilets.length
         ? r.toilets.map((t) => item(`${esc(t.name)}${t.grade ? `<span class="muted">（${esc(t.grade)}）</span>` : ''}`,
           [meters(t.distance), t.address && esc(t.address), t.type && esc(t.type), t.hours && esc(t.hours), t.diaper && '有尿布台'].filter(Boolean).join('・'))).join('')
-        : '<span class="muted">800 公尺內沒有公廁資料，可以用下面的連結查詢，或找附近的超商、加油站、捷運站。</span>';
+        : '<span class="muted">附近 5 公里內沒有公廁資料，可以用下面的連結查詢，或找附近的超商、加油站、捷運站。</span>';
       return list + (r.source === 'osm' ? '<p class="hint">目前用 OpenStreetMap 的公廁資料，可能不完整。</p>' : '<p class="hint">資料來源：環境部全國公廁建檔資料。</p>');
     }
 
+    // 垃圾車現在的進度：在路線上的哪一站、還有幾站、比表定晚多少
+    function progressText(g) {
+      const late = g.late > 2 ? `比表定晚 ${g.late} 分` : g.late < -2 ? `比表定早 ${-g.late} 分` : '大約準時';
+      const where = `🚛 現在在「${esc(g.at)}」附近（${g.ago ? `${g.ago} 分鐘前` : '剛剛'}回報，${late}）`;
+      return g.left > 0 ? `${where}，還有 ${g.left} 站到這裡` : `${where}，<b>已經過了這裡</b>`;
+    }
+
     function garbageHtml(r) {
+      for (const t of r.trucks) markNearby([{ ...t, name: `${t.car}・${t.location}` }], '🚛');
+      markNearby(r.stops, '🗑️');
       if (!r.covered) return '<span class="muted">這附近的縣市沒有公開垃圾車資料（目前有：台北、新北、基隆、高雄的清運時間，以及新北、台中、台南、高雄的垃圾車即時位置），請洽當地清潔隊或環保局。</span>';
       const stopsHtml = r.stops.length
         ? r.stops.map((s) => item(`<b>${esc(s.when)}</b>${s.soon != null && s.soon >= 0 && s.soon <= 30 ? ' <span class="eta-now">快到了</span>' : ''}・${esc(s.name)}`,
-          [meters(s.distance), esc(s.route), s.end && `停到 ${esc(s.end)}`, s.note && esc(s.note)].filter(Boolean).join('・'))).join('')
+          [s.progress && progressText(s.progress), [meters(s.distance), esc(s.route), s.end && `停到 ${esc(s.end)}`, s.note && esc(s.note)].filter(Boolean).join('・'),
+            `<button type="button" class="link" data-garbage-line="${esc(s.line)}" data-garbage-stop="${esc(s.name)}">看整條路線進度</button>`].filter(Boolean).join('<br>'))).join('')
         : '<span class="muted">600 公尺內沒有清運點資料。</span>';
       const trucks = r.trucks.length
         ? `<p><b>🚛 附近的垃圾車現在位置</b></p>${r.trucks.map((t) => item(`${esc(t.location)}`, `${meters(t.distance)}・${t.ago ? `${t.ago} 分鐘前` : '剛剛'}回報・${esc(t.car)}`)).join('')}`
         : '';
-      return stopsHtml + trucks + '<p class="hint">時間為環保局表定（高雄有今天的預估時間），遇假日、颱風可能異動。</p>';
+      return `${stopsHtml}${trucks}<div class="garbage-route"></div>
+        <p class="hint">「預計」是依垃圾車即時位置推算（目前只有新北）；高雄是環保局的今日預估；其他為表定時間，遇假日、颱風可能異動。</p>`;
     }
 
-    // 只開附近找時：查每個目的地附近；沒填目的地就查出發點（沒填就是目前位置）
+    // 整條路線：每一站的表定時間，標出垃圾車現在在哪、你查的是哪一站
+    async function showGarbageRoute(btn) {
+      const box = btn.closest('.nearby').querySelector('.garbage-route');
+      box.innerHTML = '<span class="muted">查詢中…</span>';
+      let r;
+      try { r = await api('/api/garbage/route?line=' + encodeURIComponent(btn.dataset.garbageLine)); } catch (e) { box.innerHTML = `<span class="muted">${esc(e.message)}</span>`; return; }
+      const g = r.progress;
+      layer.clearLayers();
+      L.polyline(r.stops.map((s) => [s.lat, s.lng]), { color: '#16a34a', weight: 4, opacity: 0.7 }).addTo(layer);
+      if (g) L.marker([g.lat, g.lng], { icon: L.divIcon({ className: '', html: '<div style="font-size:26px">🚛</div>', iconSize: [28, 28] }) }).bindPopup(esc(g.location)).addTo(layer).openPopup();
+      box.innerHTML = `<h3>${esc(r.route)}</h3>${g ? `<p>${progressText({ ...g, left: 1 }).replace(/，還有.*$/, '')}</p>` : '<p class="muted">這條路線現在沒有垃圾車的即時位置（還沒出車、已收班，或這個縣市沒有即時資料）。</p>'}
+        <ol class="garbage-stops">${r.stops.map((s, k) => `<li class="${g && k < g.atIndex ? 'muted' : ''}">${esc(s.start)}　${esc(s.name)}${g && k === g.atIndex ? ' <b>🚛 垃圾車在這</b>' : ''}${s.name === btn.dataset.garbageStop ? ' <b>📍 你查的</b>' : ''}</li>`).join('')}</ol>`;
+      box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    $('out').addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-garbage-line]');
+      if (b) showGarbageRoute(b);
+    });
+
+    // 查某個地方附近（沒填就是目前位置）
+    let placePoint = null;
     async function searchNearby(services) {
       trip = null;
       stopNav();
       layer.clearLayers();
-      const filled = stops.filter((s) => s.el.value.trim() || s.point);
-      const places = [];
-      if (filled.length) for (const s of filled) places.push(await resolveStop(s));
-      else places.push(await resolve('from'));
+      $('trip').innerHTML = '';
+      show('<div class="card muted">查詢中…</div>');
+      const text = $('place').value.trim();
+      const p = placePoint || (placePoint = text ? await lookup(text, '') : await currentPosition());
+      if (!text) $('place').value = '目前位置';
       tripLayer.clearLayers();
-      show(places.map((p) => `<h2>📍 ${placeName(p)}</h2>${nearbyPanel(p, services, p.name === '目前位置' ? '目前位置' : '這裡')}`).join(''));
-      map.setView([places[0].lat, places[0].lng], 16);
-      for (const p of places) L.marker([p.lat, p.lng], { icon: pin('#dc2626', '📍') }).bindPopup(esc(p.name)).addTo(tripLayer);
+      L.marker([p.lat, p.lng], { icon: pin('#dc2626', '📍') }).bindPopup(esc(p.name)).addTo(tripLayer);
+      map.setView([p.lat, p.lng], 16);
+      show(`<h2>📍 ${placeName(p)}</h2>${nearbyPanel(p, services, p.name === '目前位置' ? '目前位置' : '這裡')}`);
       fillNearby();
       if (isPhone()) setFormHidden(true);
     }
@@ -1858,7 +1900,8 @@
           return;
         }
         $(k).value = e.target.textContent;
-        points[k] = null;
+        if (k === 'place') placePoint = null;
+        else points[k] = null;
       });
     }
 
@@ -1868,9 +1911,15 @@
     $('tools').addEventListener('click', (e) => {
       const t = e.target.dataset.tool;
       if (!t) return;
-      if (tools.has(t)) { if (tools.size > 1) tools.delete(t); } else tools.add(t);
+      const lookup = [...tools].some(isService);
+      if (!isService(t) && lookup) {
+        // 從查附近回到規劃路線
+        for (const k of Object.keys(SERVICES)) tools.delete(k);
+        tools.add(t);
+      } else if (tools.has(t)) { if (tools.size > 1) tools.delete(t); } else tools.add(t);
       try { localStorage.setItem('tools', JSON.stringify([...tools])); } catch { /* 無法儲存就算了 */ }
       applyTools();
+      if ([...tools].some(isService)) return;
       if (trip && ready()) { resetChoices(); plan(); }
     });
 
@@ -1888,8 +1937,19 @@
 
     $('form').addEventListener('submit', (e) => {
       e.preventDefault();
+      const services = [...tools].filter(isService);
+      if (services.length) {
+        searchNearby(services).catch((err) => show(`<div class="card err">${esc(err.message)}</div>${err.query ? googleFix(err.query) : ''}`));
+        return;
+      }
       resetChoices();
       plan();
+    });
+    $('place').addEventListener('input', () => { placePoint = null; });
+    $('placeLocate').addEventListener('click', () => {
+      $('place').value = '';
+      placePoint = null;
+      $('form').requestSubmit();
     });
 
     $('locate').addEventListener('click', () => {

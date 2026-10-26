@@ -10,7 +10,7 @@ const QUERY = `[out:json][timeout:60];area["ISO3166-1"="TW"]->.a;(
   nwr["amenity"="luggage_storage"](area.a);
   nwr["luggage_storage"="yes"](area.a);
 );out center tags;`;
-const NEAR_M = 1500; // 車站、目的地多遠內的置物櫃
+const NEAR_M = 5000; // 列出最近的幾個，太遠（5 公里外）就不列
 const LIMIT = 5;
 
 const lockers = () => daily('lockers', async () => {
