@@ -1,7 +1,7 @@
-// 寄放行李：OpenStreetMap 上標記的置物櫃、行李寄放處（全台一份，一天抓一次）。
-// 台鐵、捷運沒有公開置物櫃資料，OSM 只有部分地點，畫面另外提供 Google 地圖搜尋附近置物櫃
+// 寄放行李：車站置物櫃清單（台鐵、高鐵、北捷、機捷、高捷），加上 OpenStreetMap 上標記的置物櫃、行李寄放處
 import { daily } from './tdx.js';
 import { distance } from './geo.js';
+import { stationLockers } from './stationLockers.js';
 
 const OVERPASS = 'https://overpass-api.de/api/interpreter';
 const QUERY = `[out:json][timeout:60];area["ISO3166-1"="TW"]->.a;(
@@ -11,7 +11,7 @@ const QUERY = `[out:json][timeout:60];area["ISO3166-1"="TW"]->.a;(
   nwr["luggage_storage"="yes"](area.a);
 );out center tags;`;
 const NEAR_M = 5000; // 列出最近的幾個，太遠（5 公里外）就不列
-const LIMIT = 5;
+const LIMIT = 8;
 
 const lockers = () => daily('lockers', async () => {
   const res = await fetch(OVERPASS, {
@@ -31,10 +31,10 @@ const lockers = () => daily('lockers', async () => {
   })).filter((l) => l.lat != null);
 });
 
-// point 附近的置物櫃，近的在前；資料抓不到就回傳空的（畫面仍有 Google 地圖搜尋）
+// point 附近的置物櫃，近的在前；資料抓不到的來源略過
 export async function lockersNear(point) {
-  const list = await lockers().catch(() => []);
-  return list
+  const [osm, stations] = await Promise.all([lockers().catch(() => []), stationLockers().catch(() => [])]);
+  return [...stations, ...osm]
     .map((l) => ({ ...l, distance: Math.round(distance(point, l)) }))
     .filter((l) => l.distance <= NEAR_M)
     .sort((a, b) => a.distance - b.distance)

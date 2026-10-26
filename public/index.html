@@ -1147,6 +1147,7 @@
       markNearby(list, '🧳');
       return list.length
         ? list.map((l) => item(esc(l.name) + goButton(l, l.name), [meters(l.distance), l.hours && esc(l.hours), l.fee && esc(l.fee)].filter(Boolean).join('・'), l)).join('')
+          + '<p class="hint">車站置物櫃依台鐵公告（2025/09）、高鐵、高捷官網與北捷、機捷整理資料（2024/01），沒有即時空櫃數，收費與位置以現場為準。</p>'
         : '<span class="muted">5 公里內沒有置物櫃資料（台鐵、捷運沒有公開置物櫃資料，目前只有部分地點），大車站多半有置物櫃或行李房，可以到車站服務台詢問。</span>';
     }
 
