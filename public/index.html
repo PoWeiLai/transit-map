@@ -507,10 +507,22 @@
     }
 
     // 查不到的地點：到 Google 地圖找，找到後把分享連結或座標貼回輸入框（伺服器會從連結讀出位置）
-    const googleFix = (q) => `<div class="card">
+    // 查不到的地點：在地圖上點一下就填回那個欄位；也保留 Google 地圖的方式
+    let pendingPick = null; // { key: 'from'|'place' } 或 { stop }，加上 text
+    function googleFix(q, pick) {
+      pendingPick = pick ? { ...pick, text: q } : null;
+      return `<div class="card">
+        ${pick ? `<h2>📍 直接在地圖上點「${esc(q)}」的位置</h2>
+          <p>把地圖移到那附近，點一下正確的位置，就會自動填入並繼續${pick.key === 'place' ? '查詢' : '規劃'}。</p>
+          <button type="button" class="primary" id="pickOnMap">到地圖上點選</button>` : ''}
         <div class="links"><a target="_blank" rel="noopener" href="https://www.google.com/maps/search/${encodeURIComponent(q)}">🔎 在 Google 地圖搜尋「${esc(q)}」</a></div>
-        <p class="hint">在 Google 地圖找到地點後按「分享」→「複製連結」，貼回出發地或目的地欄位再查一次即可；也可以貼上座標（例如 24.13702, 120.64192）。</p>
+        <p class="hint">也可以在 Google 地圖找到地點後按「分享」→「複製連結」，貼回欄位再查一次；或貼上座標（例如 24.13702, 120.64192）。</p>
       </div>`;
+    }
+    // 查不到時記下是哪個欄位
+    async function lookupFor(pick, text, emptyMsg, near) {
+      try { return await lookup(text, emptyMsg, near); } catch (err) { if (err.query) err.pick = pick; throw err; }
+    }
     async function resolve(key, near) {
       // 沒填出發點就從目前位置出發
       if (key === 'from' && !points.from && !$('from').value.trim()) {
@@ -518,10 +530,10 @@
         $('from').value = '目前位置';
         return points.from;
       }
-      return points[key] || (points[key] = await lookup($(key).value, { from: '請輸入出發點', vehicle: '請輸入取車位置' }[key], near));
+      return points[key] || (points[key] = await lookupFor({ key }, $(key).value, { from: '請輸入出發點', vehicle: '請輸入取車位置' }[key], near));
     }
     async function resolveStop(s, near) {
-      return s.point || (s.point = await lookup(s.el.value, '請輸入要去的地方', near));
+      return s.point || (s.point = await lookupFor({ stop: s }, s.el.value, '請輸入要去的地方', near));
     }
     // 地點名稱加上行政區，查錯地方時一眼看得出來，例如「大遠百（板橋區）」
     const placeName = (p) => esc(p.name) + (p.area && !p.name.includes(p.area) ? `<span class="muted">（${esc(p.area)}）</span>` : '');
@@ -624,6 +636,7 @@
     let trip = null; // { legs: [{ index, from, to, depart, results: { mode: { r, duration, error } }, mode }], sel }
 
     async function plan() {
+      pendingPick = null; // 重新規劃，之前等著在地圖上點的地點不算了
       $('trip').innerHTML = '';
       show('<div class="card muted">規劃中…</div>');
       try {
@@ -651,7 +664,7 @@
         showLeg(0);
         if (isPhone()) setFormHidden(true); // 規劃好了，手機上把輸入區收起來，留空間給地圖和結果
       } catch (err) {
-        show(`<div class="card err">${esc(err.message)}</div>${err.query ? googleFix(err.query) : ''}`);
+        show(`<div class="card err">${esc(err.message)}</div>${err.query ? googleFix(err.query, err.pick) : ''}`);
       }
     }
     const toMin = (hhmm) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; };
@@ -1356,6 +1369,11 @@
       }
     }
     $('out').addEventListener('click', (e) => {
+      if (e.target.id === 'pickOnMap') {
+        if (isPhone()) setFormHidden(true);
+        $('map').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+      }
       const b = e.target.closest('button[data-garbage-line]');
       if (b) showGarbageRoute(b);
       const go = e.target.closest('button[data-go]');
@@ -1395,13 +1413,14 @@
     // 查某個地方附近（沒填就是目前位置）
     let placePoint = null;
     async function searchNearby(services) {
+      pendingPick = null;
       trip = null;
       stopNav();
       layer.clearLayers();
       $('trip').innerHTML = '';
       show('<div class="card muted">查詢中…</div>');
       const text = $('place').value.trim();
-      const p = placePoint || (placePoint = text ? await lookup(text, '') : await currentPosition());
+      const p = placePoint || (placePoint = text ? await lookupFor({ key: 'place' }, text, '') : await currentPosition());
       if (!text) $('place').value = '目前位置';
       tripLayer.clearLayers();
       L.marker([p.lat, p.lng], { icon: pin('#dc2626', '📍') }).bindPopup(esc(p.name)).addTo(tripLayer);
@@ -2150,7 +2169,7 @@
       e.preventDefault();
       const services = [...tools].filter(isService);
       if (services.length) {
-        searchNearby(services).catch((err) => show(`<div class="card err">${esc(err.message)}</div>${err.query ? googleFix(err.query) : ''}`));
+        searchNearby(services).catch((err) => show(`<div class="card err">${esc(err.message)}</div>${err.query ? googleFix(err.query, err.pick) : ''}`));
         return;
       }
       resetChoices();
@@ -2177,6 +2196,17 @@
 
     map.on('click', (e) => {
       const { lat, lng } = e.latlng;
+      if (pendingPick) {
+        const { key, stop, text } = pendingPick;
+        pendingPick = null;
+        const point = { lat, lng, name: text };
+        if (key === 'place') { placePoint = point; $('place').value = text; $('form').requestSubmit(); return; }
+        if (key) { points[key] = point; $(key).value = text; }
+        if (stop) { stop.point = point; stop.el.value = text; }
+        resetChoices();
+        plan();
+        return;
+      }
       if (document.body.classList.contains('lookup')) {
         placePoint = { lat, lng, name: '地圖選點' };
         $('place').value = '地圖選點';

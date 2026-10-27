@@ -231,16 +231,27 @@ async function tdxAddress(text, near) {
   const a = parseAddress(text);
   if (!a) return [];
   let areas = [[a.city, a.district]];
+  let roadHit = null; // 找到的那條路（門牌查不到時，至少標在路上）
   if (!a.city || !a.district) {
-    // 找那條路在哪些縣市、區：寫了縣市就只留那個縣市的
-    const roads = await photonOnce([a.road, a.district, a.city].filter(Boolean).join(', '), near).catch(() => []);
-    const seen = new Set();
-    areas = roads
-      .filter((r) => r.city && r.district && [r.street, r.name].some((x) => plain(x).startsWith(plain(a.road).replace(/\d+[巷弄].*$/, ''))))
-      .filter((r) => (!a.city || sameText(r.city, a.city)) && (!a.district || sameText(r.district, a.district)))
-      .map((r) => [plain(r.city), plain(r.district)])
-      .filter(([c, d]) => !seen.has(c + d) && seen.add(c + d))
-      .slice(0, near ? 1 : ADDRESS_AREAS); // 知道出發點時只查最近的那個地區
+    // 「板橋實踐路64號」：區少寫「區」，前兩個字可能是區名（板橋區、三重區…），路名照樣找不到時再試
+    const tries = [a];
+    if (!a.city && !a.district && a.road.length > 3) {
+      for (const suffix of ['區', '鎮', '鄉', '市']) tries.push({ ...a, district: a.road.slice(0, 2) + suffix, road: a.road.slice(2) });
+    }
+    for (const t of tries) {
+      // 找那條路在哪些縣市、區：寫了縣市就只留那個縣市的
+      const roads = await photonOnce([t.road, t.district, t.city].filter(Boolean).join(', '), near).catch(() => []);
+      const seen = new Set();
+      const hits = roads
+        .filter((r) => r.city && r.district && [r.street, r.name].some((x) => plain(x).startsWith(plain(t.road).replace(/\d+[巷弄].*$/, ''))))
+        .filter((r) => (!t.city || sameText(r.city, t.city)) && (!t.district || sameText(r.district, t.district)));
+      roadHit = hits[0] || null;
+      areas = hits
+        .map((r) => [plain(r.city), plain(r.district)])
+        .filter(([c, d]) => !seen.has(c + d) && seen.add(c + d))
+        .slice(0, near ? 1 : ADDRESS_AREAS); // 知道出發點時只查最近的那個地區
+      if (areas.length) { Object.assign(a, t); break; }
+    }
   }
   const found = [];
   for (const [city, district] of areas) {
@@ -252,6 +263,19 @@ async function tdxAddress(text, near) {
       const [lng, lat] = r.Geometry.match(/[\d.]+/g).map(Number);
       found.push({ name: `${a.road}${a.number}號`, label: r.Address, lat, lng, area: district, road: false, exact: true });
     }
+  }
+  // TDX 查不到這個門牌（或 TDX 暫時不能用）：標在那條路上，名稱註明不是確切位置
+  if (!found.length && !roadHit) {
+    const roads = await photonOnce([a.road, a.district, a.city].filter(Boolean).join(', '), near).catch(() => []);
+    roadHit = roads.find((r) => r.city && r.district && [r.street, r.name].some((x) => plain(x).startsWith(plain(a.road).replace(/\d+[巷弄].*$/, '')))
+      && (!a.district || sameText(r.district, a.district))) || null;
+  }
+  if (!found.length && roadHit) {
+    found.push({
+      name: `${a.road}（${plain(roadHit.district)}，${a.number}號的確切位置查不到，標在路上）`,
+      label: `${plain(roadHit.city)}${plain(roadHit.district)}${a.road}`,
+      lat: roadHit.lat, lng: roadHit.lng, area: plain(roadHit.district), road: false, exact: true,
+    });
   }
   return found;
 }
