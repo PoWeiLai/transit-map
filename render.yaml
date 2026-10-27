@@ -15,4 +15,10 @@ services:
         sync: false
       - key: TDX_CLIENT_SECRET
         sync: false
-      # 時刻表一天抓一次存在 data/cache；免費方案沒有永久硬碟，重開機後會重抓（只要 4 次請求）。
+      # 時刻表一天抓一次存在 data/cache；免費方案沒有永久硬碟，重開機後會重抓（設了下面的 Turso 就不用）。
+      # Turso（雲端 SQLite）：一天下載一次的資料也存一份，主機休眠重開後直接從這裡拿，不用再向 TDX 重抓（避免超過用量）。
+      # 到 https://turso.tech 建資料庫，把資料庫網址（libsql://…）和 token 填在服務的 Environment 頁。不設定也能跑，只是重開後會重抓。
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false

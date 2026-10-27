@@ -1,6 +1,7 @@
 // 交通部 TDX API：自動取得／更新 token，並限制請求速度
 // 免費金鑰每分鐘只能 5 次，所以大份資料一天抓一次並存到硬碟
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { load, save } from './store.js';
 
 const CACHE_DIR = new URL('./data/cache/', import.meta.url);
 const TOKEN_URL = 'https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token';
@@ -87,7 +88,7 @@ export function cached(key, ms, fn) {
   return value;
 }
 
-// 一天只抓一次的資料：先找硬碟上當天的檔案，沒有才呼叫 TDX
+// 一天只抓一次的資料：先找硬碟上當天的檔案，再找 Turso（免費主機重開後硬碟是空的），都沒有才呼叫 TDX
 export function daily(name, fn) {
   const { date } = taipeiNow();
   return cached(`daily:${name}:${date}`, 24 * 60 * 60 * 1000, async () => {
@@ -95,9 +96,19 @@ export function daily(name, fn) {
     try {
       return JSON.parse(readFileSync(file, 'utf8'));
     } catch { /* 沒有快取檔 */ }
+    const writeLocal = (data) => {
+      mkdirSync(CACHE_DIR, { recursive: true });
+      writeFileSync(file, JSON.stringify(data));
+    };
+    const stored = await load(name, date).catch((e) => { console.log(`Turso 讀取失敗（${name}）：`, e.message); return null; });
+    if (stored) {
+      writeLocal(stored);
+      return stored;
+    }
     const data = await fn();
-    mkdirSync(CACHE_DIR, { recursive: true });
-    writeFileSync(file, JSON.stringify(data));
+    writeLocal(data);
+    // 存到 Turso 在背景做，失敗也不影響這次查詢
+    save(name, date, data).catch((e) => console.log(`Turso 寫入失敗（${name}）：`, e.message));
     return data;
   });
 }
