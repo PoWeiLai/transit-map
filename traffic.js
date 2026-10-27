@@ -1,5 +1,5 @@
 // 即時路況：TDX 國道、省道與各縣市市區道路的路段車速，找出地圖範圍內車多、壅塞的路段
-import { tdx, hasTdx, daily, cached } from './tdx.js';
+import { tdx, hasTdx, weekly, cached } from './tdx.js';
 import { CITIES, inBox } from './cities.js';
 
 const LIVE_MS = 3 * 60 * 1000;
@@ -15,7 +15,7 @@ function parseWkt(wkt) {
     body.split(',').map((pair) => { const [lng, lat] = pair.trim().split(/\s+/).map(Number); return [lat, lng]; }));
 }
 
-const shapesOf = (source) => daily(`traffic-shape-${source.replace('/', '-')}`, async () => {
+const shapesOf = (source) => weekly(`traffic-shape-${source.replace('/', '-')}`, async () => {
   const body = await tdx(`v2/Road/Traffic/SectionShape/${source}`, {}, { timeout: DOWNLOAD_MS });
   return (body.SectionShapes || body).map((s) => {
     const lines = parseWkt(s.Geometry);

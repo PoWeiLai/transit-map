@@ -1,5 +1,5 @@
 // 公路／國道客運：長途規劃（像火車一樣先接駁到客運站），以及票價、業者（電話、官網）、路線圖
-import { tdx, daily, cached, taipeiNow } from './tdx.js';
+import { tdx, weekly, cached, taipeiNow } from './tdx.js';
 import { distance } from './geo.js';
 import { intercityData } from './bus.js';
 
@@ -7,11 +7,11 @@ const FARE_MS = 24 * 60 * 60 * 1000;
 const FARE_BATCH = 40; // 一次查幾條路線的票價（全台一份太大，只查用得到的）
 
 // 路線 → 業者、路線圖；業者 → 電話、官網（各一天抓一次，資料不大）
-const routeInfo = () => daily('coach-routes', async () => {
+const routeInfo = () => weekly('coach-routes', async () => {
   const list = await tdx('v2/Bus/Route/InterCity', { $select: 'RouteUID,Operators,RouteMapImageUrl' });
   return Object.fromEntries(list.map((r) => [r.RouteUID, { ops: (r.Operators || []).map((o) => o.OperatorID), map: r.RouteMapImageUrl || '' }]));
 });
-const operators = () => daily('coach-operators', async () => {
+const operators = () => weekly('coach-operators', async () => {
   const list = await tdx('v2/Bus/Operator/InterCity');
   return Object.fromEntries(list.map((o) => [o.OperatorID, { name: o.OperatorName?.Zh_tw || '', phone: o.OperatorPhone || '', url: o.OperatorUrl || '' }]));
 });

@@ -1,7 +1,7 @@
 // 公車轉乘規劃：台北市＋新北市用公開資料（不需金鑰），其他縣市與公路／國道客運用交通部 TDX
 import { gunzipSync } from 'node:zlib';
 import { distance } from './geo.js';
-import { tdx, hasTdx, daily, cached, taipeiNow, toMinutes } from './tdx.js';
+import { tdx, hasTdx, weekly, cached, taipeiNow, toMinutes } from './tdx.js';
 import { citiesAt, inBox } from './cities.js';
 import { addCoachInfo } from './coach.js';
 
@@ -135,7 +135,7 @@ async function getNetwork() {
 }
 
 // TDX 的路線站序（一天抓一次存到硬碟），只留規劃用得到的欄位
-const tdxRoutes = (source) => daily(`bus-${source}`, async () => {
+const tdxRoutes = (source) => weekly(`bus-${source}`, async () => {
   const path = source === INTERCITY ? 'v2/Bus/StopOfRoute/InterCity' : `v2/Bus/StopOfRoute/City/${source}`;
   const list = await tdx(path, { $select: 'RouteUID,RouteName,SubRouteUID,SubRouteName,Direction,Stops' }, { timeout: DOWNLOAD_MS });
   return list.map((r) => ({
@@ -290,7 +290,7 @@ async function getEta(points, routes = []) {
 // ---------- 客運時刻表 ----------
 
 // TDX 的班表一天抓一次，壓縮成每條子路線方向：站牌 + 每班車 [行駛星期（位元）, 各站時間（分鐘）]
-const schedules = () => daily(`bus-schedule-${INTERCITY}`, async () => {
+const schedules = () => weekly(`bus-schedule-${INTERCITY}`, async () => {
   const list = await tdx(`v2/Bus/Schedule/${INTERCITY}`, { $select: 'SubRouteUID,Direction,Timetables' }, { timeout: SCHEDULE_MS });
   const out = {};
   for (const r of list) {

@@ -262,7 +262,8 @@
     const TRAFFIC_COLOR = { slow: '#f59e0b', jam: '#dc2626' };
     let trafficOn = false, trafficTimer = null, trafficSeq = 0;
     async function loadTraffic() {
-      if (!trafficOn) return;
+      // 網頁在背景（切到別的 App、螢幕關了）就不更新，省 TDX 用量；回到畫面時再更新
+      if (!trafficOn || document.hidden) return;
       const b = map.getBounds();
       const seq = ++trafficSeq;
       try {
@@ -286,6 +287,7 @@
     }
     let trafficMove = null;
     map.on('moveend', () => { clearTimeout(trafficMove); trafficMove = setTimeout(loadTraffic, 600); });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) loadTraffic(); });
     const trafficCtl = L.control({ position: 'topleft' });
     trafficCtl.onAdd = () => {
       const box = L.DomUtil.create('div', 'leaflet-bar traffic');

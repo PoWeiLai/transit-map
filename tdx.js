@@ -1,7 +1,7 @@
 // 交通部 TDX API：自動取得／更新 token，並限制請求速度
 // 免費金鑰每分鐘只能 5 次，所以大份資料一天抓一次並存到硬碟
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { load, save } from './store.js';
+import { load, save, addUsage, recentUsage } from './store.js';
 
 const CACHE_DIR = new URL('./data/cache/', import.meta.url);
 const TOKEN_URL = 'https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token';
@@ -72,7 +72,9 @@ export async function tdx(path, params = {}, { timeout = 60000 } = {}) {
       continue;
     }
     if (!res.ok) throw new Error(`TDX ${res.status}：${path}`);
-    return res.json();
+    const text = await res.text();
+    countUsage(path, Buffer.byteLength(text));
+    return JSON.parse(text);
   }
 }
 
@@ -88,9 +90,8 @@ export function cached(key, ms, fn) {
   return value;
 }
 
-// 一天只抓一次的資料：先找硬碟上當天的檔案，再找 Turso（免費主機重開後硬碟是空的），都沒有才呼叫 TDX
-export function daily(name, fn) {
-  const { date } = taipeiNow();
+// 一段期間（一天或一週）只抓一次的資料：先找硬碟上的檔案，再找 Turso（免費主機重開後硬碟是空的），都沒有才呼叫 TDX
+function periodic(name, date, fn) {
   return cached(`daily:${name}:${date}`, 24 * 60 * 60 * 1000, async () => {
     const file = new URL(`${name}-${date}.json`, CACHE_DIR);
     try {
@@ -111,6 +112,52 @@ export function daily(name, fn) {
     save(name, date, data).catch((e) => console.log(`Turso 寫入失敗（${name}）：`, e.message));
     return data;
   });
+}
+
+// 一天抓一次：當天的時刻表（會停駛、加開）、即時性較高的資料
+export const daily = (name, fn) => periodic(name, taipeiNow().date, fn);
+
+// 一週抓一次（每週一換新）：很少變動又很大的資料，例如全台客運班表、路線、票價、路段形狀，省 TDX 用量
+export function weekly(name, fn) {
+  const today = new Date(`${taipeiNow().date}T00:00:00Z`);
+  const monday = new Date(today - ((today.getUTCDay() + 6) % 7) * 86400000).toISOString().slice(0, 10);
+  return periodic(name, monday, fn);
+}
+
+// ---------- TDX 用量紀錄：每天呼叫幾次、下載多少，和 TDX 會員中心對照，接近上限前就知道 ----------
+const FLUSH_MS = 60 * 1000;
+const usage = { date: '', calls: 0, bytes: 0, paths: new Map() }; // 這次開機以來、今天的用量
+let pending = { calls: 0, bytes: 0 }; // 還沒寫進 Turso 的
+let flushTimer = null;
+
+function countUsage(path, bytes) {
+  const { date } = taipeiNow();
+  if (usage.date !== date) Object.assign(usage, { date, calls: 0, bytes: 0, paths: new Map() });
+  usage.calls++;
+  usage.bytes += bytes;
+  const key = path.replace(/\/[^/]*%[^/]*$/, '/…'); // 地址查詢等帶參數的路徑合併計算
+  const p = usage.paths.get(key) || { calls: 0, bytes: 0 };
+  usage.paths.set(key, { calls: p.calls + 1, bytes: p.bytes + bytes });
+  pending = { calls: pending.calls + 1, bytes: pending.bytes + bytes };
+  // 累積一分鐘寫一次 Turso，不要每次呼叫都寫
+  flushTimer ||= setTimeout(() => {
+    flushTimer = null;
+    const { calls, bytes: b } = pending;
+    pending = { calls: 0, bytes: 0 };
+    addUsage(date, calls, b).catch(() => { pending.calls += calls; pending.bytes += b; });
+  }, FLUSH_MS);
+  flushTimer.unref?.();
+}
+
+// 今天（這台主機）的用量明細，加上 Turso 記錄的最近幾天
+export async function tdxUsage() {
+  const top = [...usage.paths].sort((a, b) => b[1].bytes - a[1].bytes).slice(0, 15)
+    .map(([path, x]) => ({ path, calls: x.calls, mb: +(x.bytes / 1e6).toFixed(2) }));
+  const days = await recentUsage().catch(() => []);
+  return {
+    sinceStart: { date: usage.date, calls: usage.calls, mb: +(usage.bytes / 1e6).toFixed(2), top },
+    days: days.map((d) => ({ ...d, mb: +(d.bytes / 1e6).toFixed(2) })),
+  };
 }
 
 // 台灣時間的日期（YYYY-MM-DD）與現在是當天第幾分鐘

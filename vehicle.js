@@ -1,7 +1,7 @@
 // 汽車、機車（自己的車、共享機車、共享汽車）：目的地附近的停車場與費用估算。
 // 停車場用 TDX 全台路外停車場（含汽車、機車即時剩餘車位）；沒有 TDX 金鑰時機車用台北市公開資料
 import { distance } from './geo.js';
-import { tdx, hasTdx, daily, cached } from './tdx.js';
+import { tdx, hasTdx, weekly, cached } from './tdx.js';
 import { citiesAt } from './cities.js';
 import { nearbyParking as taipeiMotoParking } from './scooter.js';
 
@@ -20,7 +20,7 @@ function feeFor(text, kind) {
   return parts.length ? parts.join('；') : (String(text || '').trim() || '依現場公告');
 }
 
-const lotsOf = (city) => daily(`parking-${city}`, async () => {
+const lotsOf = (city) => weekly(`parking-${city}`, async () => {
   const { CarParks } = await tdx(`v1/Parking/OffStreet/CarPark/City/${city}`, {}, { timeout: DOWNLOAD_MS });
   return CarParks.map((p) => ({
     id: p.CarParkID,

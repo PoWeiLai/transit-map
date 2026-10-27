@@ -3,7 +3,7 @@
 import { gzipSync, gunzipSync } from 'node:zlib';
 
 const CHUNK = 512 * 1024; // 大份資料（例如全台客運班表）切成小段存，避免單次請求太大
-const KEEP_DAYS = 2;      // 只留最近兩天，免費額度不會一直累積
+const KEEP_DAYS = 9;      // 只留最近幾天（一週抓一次的資料要留到下週一），免費額度不會一直累積
 const TIMEOUT_MS = 30000;
 
 const url = () => process.env.TURSO_DATABASE_URL?.replace(/^libsql:\/\//, 'https://');
@@ -33,9 +33,27 @@ async function pipeline(statements) {
 }
 
 let ready = null;
-const init = () => (ready ||= pipeline([[
-  'CREATE TABLE IF NOT EXISTS daily_cache (name TEXT NOT NULL, date TEXT NOT NULL, part INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (name, date, part))',
-]]).catch((e) => { ready = null; throw e; }));
+const init = () => (ready ||= pipeline([
+  ['CREATE TABLE IF NOT EXISTS daily_cache (name TEXT NOT NULL, date TEXT NOT NULL, part INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (name, date, part))'],
+  ['CREATE TABLE IF NOT EXISTS tdx_usage (date TEXT PRIMARY KEY, calls INTEGER NOT NULL, bytes INTEGER NOT NULL)'],
+]).catch((e) => { ready = null; throw e; }));
+
+// TDX 用量：每天累加呼叫次數與下載量
+export async function addUsage(date, calls, bytes) {
+  if (!hasStore() || !calls) return;
+  await init();
+  await pipeline([[
+    'INSERT INTO tdx_usage (date, calls, bytes) VALUES (?, ?, ?) ON CONFLICT(date) DO UPDATE SET calls = calls + excluded.calls, bytes = bytes + excluded.bytes',
+    [date, calls, bytes],
+  ]]);
+}
+
+export async function recentUsage(days = 14) {
+  if (!hasStore()) return [];
+  await init();
+  const [result] = await pipeline([['SELECT date, calls, bytes FROM tdx_usage ORDER BY date DESC LIMIT ?', [days]]]);
+  return result.rows.map(([d, c, b]) => ({ date: d.value, calls: Number(c.value), bytes: Number(b.value) }));
+}
 
 // 讀：沒有這份資料回傳 null
 export async function load(name, date) {

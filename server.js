@@ -11,7 +11,7 @@ import { lockersNear } from './lockers.js';
 import { toiletsNear, warmUp as warmUpToilets } from './toilets.js';
 import { garbageNear, garbageRoute, warmUp as warmUpGarbage } from './garbage.js';
 import { planRail, railStations } from './rail.js';
-import { tdx, hasTdx, taipeiNow } from './tdx.js';
+import { tdx, hasTdx, taipeiNow, tdxUsage } from './tdx.js';
 import { planMetro, metroMap } from './metro.js';
 
 // TDX 金鑰等設定放在 .env（不進版控）
@@ -879,6 +879,9 @@ app.get('/api/rail', wrap(async (req, res) => {
   if (when.error) return res.status(400).json({ error: when.error });
   res.json(await planRail(req.query.system === 'thsr' ? 'thsr' : 'tra', from, to, accessPrefs(req.query), when));
 }));
+
+// TDX 用量：這次開機以來今天的明細（哪些資料最大），以及 Turso 記錄的最近幾天，和 TDX 會員中心對照
+app.get('/api/tdx-usage', wrap(async (req, res) => res.json(await tdxUsage())));
 
 // 寄放行李：某個地點（例如下車的車站、目的地）附近的置物櫃
 app.get('/api/lockers', wrap(async (req, res) => {

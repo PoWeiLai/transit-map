@@ -1,6 +1,6 @@
 // 台鐵、高鐵：找離出發點／目的地最近的車站，列出接下來能搭的班次
 import { distance } from './geo.js';
-import { tdx, daily, cached, taipeiNow, toMinutes } from './tdx.js';
+import { tdx, daily, weekly, cached, taipeiNow, toMinutes } from './tdx.js';
 
 const MAX_TRAINS = 12;
 const LIVE_MS = 2 * 60 * 1000;
@@ -32,7 +32,7 @@ const SYSTEMS = {
     label: '台鐵',
     speed: 60, // 平均車速（km/h，直線距離），只用來估計大概幾點到站
     async stations() {
-      const { Stations } = await daily('tra-stations', () => tdx('v3/Rail/TRA/Station'));
+      const { Stations } = await weekly('tra-stations', () => tdx('v3/Rail/TRA/Station'));
       return Stations.map((s) => ({
         id: s.StationID, name: s.StationName.Zh_tw,
         lat: s.StationPosition.PositionLat, lng: s.StationPosition.PositionLon,
@@ -78,7 +78,7 @@ const SYSTEMS = {
     label: '高鐵',
     speed: 200,
     async stations() {
-      const list = await daily('thsr-stations', () => tdx('v2/Rail/THSR/Station'));
+      const list = await weekly('thsr-stations', () => tdx('v2/Rail/THSR/Station'));
       return list.map((s) => ({
         id: s.StationID, name: `高鐵${s.StationName.Zh_tw}`,
         lat: s.StationPosition.PositionLat, lng: s.StationPosition.PositionLon,
@@ -102,7 +102,7 @@ const SYSTEMS = {
     },
     // 票價（單程票）：全票與優待票（孩童、敬老、愛心，半價）
     async fares() {
-      const list = await daily('thsr-fares', () => tdx('v2/Rail/THSR/ODFare'));
+      const list = await weekly('thsr-fares', () => tdx('v2/Rail/THSR/ODFare'));
       const CABIN = { 1: 'standard', 2: 'business', 3: 'free' };
       return new Map(list.map((f) => {
         const fare = { full: {}, concession: {} };
