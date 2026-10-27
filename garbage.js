@@ -1,5 +1,8 @@
 // 垃圾車：各縣市環保局的清運點（固定丟垃圾的地點）與表定經過時間，加上垃圾車即時位置。
-// 全國沒有統一的開放資料，有公開的縣市才查得到（表定：台北、新北、基隆、高雄；即時位置：新北、台中、台南、高雄）。
+// 全國沒有統一的開放資料，有公開的縣市才查得到：
+//   有座標：台北、新北、基隆、高雄、宜蘭（用距離找最近的）
+//   只有地址：台中、新竹市、高雄今日預估（用查詢地點的「里」和「路名」比對）
+//   即時位置：新北、台中、台南、高雄
 // 只下載查詢地點所在縣市的資料；還在下載就先回覆「下載中」，不讓查詢卡住
 import { daily, cached, taipeiNow, toMinutes } from './tdx.js';
 import { distance } from './geo.js';
@@ -99,6 +102,18 @@ const SOURCES = {
     return rows.map((r) => stop('Keelung', r['清運路線名稱'], r['清運點'], r['緯度'], r['經度'], r['預估到達時間'], r['預估離開時間'], null,
       r['回收日(星期幾)'] ? `資源回收：星期${r['回收日(星期幾)'].split(',').map((d) => DAYS[Number(d) % 7]).join('、')}` : ''));
   },
+  // 宜蘭：每列是某個星期的一站，同一站同一時間合併成一筆
+  async YilanCounty() {
+    const rows = await get('https://opendata.ilepb.gov.tw/ILEPB04004?format=json&media=file');
+    const by = new Map();
+    for (const r of rows) {
+      const key = `${r['鄉鎮市']}|${r['路線名稱']}|${r['清運點名稱']}|${r['表定時間']}`;
+      const day = 1 << (Number(r['星期']) % 7);
+      if (by.has(key)) by.get(key).days |= day; else by.set(key, { r, days: day });
+    }
+    return [...by.values()].map(({ r, days }) => stop('YilanCounty', `${r['鄉鎮市'].replace('清潔隊', '')} ${r['路線名稱']}`, r['清運點名稱'],
+      r['緯度'], r['經度'], r['表定時間'], '', days, '', '', Number(r['站序'])));
+  },
   async Kaohsiung() {
     const bodies = await pool(KAOHSIUNG, KCG_PARALLEL, (id) => get(KCG(id)).catch(() => null));
     if (!bodies.some(Boolean)) throw new Error('高雄各區資料都抓不到');
@@ -131,11 +146,79 @@ const cityData = (city) => (Date.now() - (failedAt.get(city) || 0) < RETRY_MS ? 
 // 最多等 ms，逾時回傳 fallback（原本的工作繼續在背景跑完）
 const within = (promise, ms, fallback) => Promise.race([promise, new Promise((r) => setTimeout(() => r(fallback), ms))]);
 
-// 高雄市今天的預估到點時間（依垃圾車實際進度推算），用行政區＋地點對應清運點
-const kaohsiungEta = () => cached('garbage-kcg-eta', 5 * 60 * 1000, async () => {
-  const body = await get(KCG('14fe516d-ac62-4905-9325-70daae7616bd'));
-  return new Map((body.data || []).filter((r) => r.estime_s).map((r) => [`${r.area}|${r.caption}`, r.estime_s]));
+// 高雄市今天各點的表定與預估到點時間（依垃圾車實際進度推算），全市都有（含沒有路線資料的區）
+const kaohsiungToday = () => cached('garbage-kcg-today', 5 * 60 * 1000, async () => (await get(KCG('14fe516d-ac62-4905-9325-70daae7616bd'))).data || []);
+const kaohsiungEta = async () => new Map((await kaohsiungToday()).filter((r) => r.estime_s).map((r) => [`${r.area}|${r.caption}`, r.estime_s]));
+
+// ---------- 只有地址的縣市：用查詢地點的里、路名比對 ----------
+
+// 每筆：區、里、地點（地址）、表定時間、星期（位元）
+const ADDRESS = {
+  // 台中市定時定點垃圾收運地點：g_d1～g_d7 是星期一～日的一般垃圾時間，r_ 是資源回收
+  async Taichung() {
+    const rows = await get('https://newdatacenter.taichung.gov.tw/api/v1/no-auth/resource.download?rid=68d1a87f-7baa-4b50-8408-c36a3a7eda68');
+    return rows.map((r) => {
+      let days = 0, start = '', end = '';
+      for (let k = 1; k <= 7; k++) {
+        if (!r[`g_d${k}_time_s`]) continue;
+        days |= 1 << (k % 7);
+        start ||= r[`g_d${k}_time_s`];
+        end ||= r[`g_d${k}_time_e`];
+      }
+      const recycle = [1, 2, 3, 4, 5, 6, 7].filter((k) => r[`r_d${k}_time_s`]).map((k) => DAYS[k % 7]).join('、');
+      return start && {
+        area: r.area, village: r.village, name: r.caption, start, end: end !== start ? end : '', days,
+        route: `${r.area} ${r.car_licence}`, note: [r.task_type, recycle && `資源回收：星期${recycle}`].filter(Boolean).join('・'),
+      };
+    }).filter(Boolean);
+  },
+  // 新竹市垃圾清運路線總表：只有地點文字，沒有區、里
+  async Hsinchu() {
+    const rows = parseCsv(await get('https://7966.hccg.gov.tw/WEB/_IMP/API/CleanWeb/SummaryCsvForOpenData/City/hcc', 'text'));
+    return rows.map((r) => {
+      const recycle = String(r['回收日_星期幾'] || '').split(/[，,]/).filter(Boolean).map((d) => DAYS[Number(d) % 7]).join('、');
+      return {
+        area: '', village: '', name: r['清潔公車停置地點'], start: String(r['預估到達時間']).slice(0, 5), end: String(r['預估離開時間']).slice(0, 5),
+        days: null, route: r['清運路線名稱'], note: recycle ? `資源回收：星期${recycle}` : '',
+      };
+    }).filter((x) => /^\d{1,2}:\d{2}$/.test(x.start));
+  },
+};
+const addressData = (city) => cached(`garbage-addr:${city}:${taipeiNow().date}`, 24 * 60 * 60 * 1000,
+  () => daily(`garbage-addr-${city}`, () => ADDRESS[city]()));
+
+// 查詢地點的路名、里、區（OpenStreetMap 反查地址）
+const addressOf = (p) => cached(`garbage-rev:${p.lat.toFixed(4)},${p.lng.toFixed(4)}`, 24 * 60 * 60 * 1000, async () => {
+  const url = `https://nominatim.openstreetmap.org/reverse?${new URLSearchParams({ lat: p.lat, lon: p.lng, format: 'jsonv2', 'accept-language': 'zh-TW', zoom: 18 })}`;
+  const res = await fetch(url, { headers: { 'User-Agent': 'transit-map/1.0 (+https://github.com/PoWeiLai/transit-map)' }, signal: AbortSignal.timeout(8000) });
+  if (!res.ok) throw new Error(`地址反查 ${res.status}`);
+  const a = (await res.json()).address || {};
+  return { road: a.road || '', village: a.neighbourhood || a.quarter || a.village || '', area: a.suburb || a.city_district || a.town || '' };
 });
+
+// 路名比對：一段／1段、台／臺 寫法不同
+const NUM = { 一: '1', 二: '2', 三: '3', 四: '4', 五: '5', 六: '6', 七: '7', 八: '8', 九: '9' };
+const normAddr = (s) => String(s).replace(/台/g, '臺').replace(/([一二三四五六七八九])段/g, (_, c) => `${NUM[c]}段`).replace(/\s/g, '');
+
+// 同一個里的點最優先，其次同一條路（同一區）；格式和有座標的地點一樣，但沒有距離
+function addressPoints(rows, addr, now, day) {
+  const village = addr.village, road = normAddr(addr.road), area = addr.area;
+  const sameArea = (r) => !area || !r.area || r.area === area;
+  const byVillage = village ? rows.filter((r) => r.village === village && sameArea(r)) : [];
+  const byRoad = road ? rows.filter((r) => !byVillage.includes(r) && sameArea(r) && normAddr(r.name).includes(road)) : [];
+  const points = new Map();
+  for (const [list, approx] of [[byVillage, `同一個里（${village}）`], [byRoad, `同一條路（${addr.road}）`]]) {
+    for (const r of list) {
+      if (!points.has(r.name)) points.set(r.name, { name: r.name, lat: null, lng: null, distance: null, approx, passes: [] });
+      const next = r.when ? { when: r.when, soon: r.soon } : nextPass(r, now, day);
+      points.get(r.name).passes.push({
+        route: r.route, line: null, start: r.start, end: r.end, days: daysText(r.days), note: r.note,
+        when: next.when, soon: next.soon, progress: null,
+      });
+    }
+  }
+  return [...points.values()];
+}
 
 // ---------- 即時位置 ----------
 
@@ -199,6 +282,7 @@ function progressOf(list, truck, mine, now) {
 export async function garbageNear(point) {
   const cities = citiesAt([point]);
   const withStops = cities.filter((c) => SOURCES[c]);
+  const withAddr = cities.filter((c) => ADDRESS[c]);
   const withLive = cities.filter((c) => LIVE[c]);
   const [datas, lives, eta] = await Promise.all([
     Promise.all(withStops.map((c) => within(cityData(c).catch(() => false), LOAD_WAIT_MS, null))),
@@ -234,10 +318,33 @@ export async function garbageNear(point) {
       });
     }
   }
-  for (const p of points) p.passes.sort((a, b) => (a.soon ?? 9999) - (b.soon ?? 9999) || toMinutes(a.start) - toMinutes(b.start));
-  // 近的地點在前（最近的幾個），每個地點下一台最快的排前面
+  // 近的地點在前（最近的幾個）
   points.sort((a, b) => a.distance - b.distance);
-  const shown = points.slice(0, MAX_POINTS);
+  let shown = points.slice(0, MAX_POINTS);
+
+  // 附近沒有有座標的點：台中、新竹市、高雄（今日預估）用地址比對同一個里、同一條路
+  const useKcgToday = withStops.includes('Kaohsiung') && !shown.length;
+  let addrLoading = false, addrFailed = false;
+  if (!shown.length && (withAddr.length || useKcgToday)) {
+    const addr = await within(addressOf(point).catch(() => null), LIVE_WAIT_MS, null);
+    if (addr && (addr.village || addr.road)) {
+      const lists = await Promise.all(withAddr.map((c) => within(addressData(c).catch(() => false), LOAD_WAIT_MS, null)));
+      addrLoading = lists.some((l) => l === null);
+      addrFailed = lists.some((l) => l === false);
+      const rows = lists.filter(Boolean).flat();
+      if (useKcgToday) {
+        const today = await within(kaohsiungToday().catch(() => []), LIVE_WAIT_MS, []);
+        rows.push(...today.filter((r) => r.today_s).map((r) => ({
+          area: r.area, village: r.village, name: r.caption, start: r.today_s, end: r.today_e, days: 1 << day,
+          route: `${r.area} ${r.car_licence}`, note: r.task || '',
+          when: r.estime_s ? `今天預估 ${r.estime_s}（表定 ${r.today_s}）` : `今天 ${r.today_s}`,
+          soon: toMinutes(r.estime_s || r.today_s) - now,
+        })));
+      }
+      shown = addressPoints(rows, addr, now, day).slice(0, MAX_POINTS);
+    }
+  }
+  for (const p of shown) p.passes.sort((a, b) => (a.soon ?? 9999) - (b.soon ?? 9999) || toMinutes(a.start) - toMinutes(b.start));
   const next = shown.flatMap((p) => p.passes.map((x) => ({ ...x, name: p.name, distance: p.distance })))
     .filter((x) => x.soon != null && x.soon >= -2).sort((a, b) => a.soon - b.soon)[0] || null;
 
@@ -252,9 +359,9 @@ export async function garbageNear(point) {
     points: shown,
     next,
     trucks: nearTrucks,
-    covered: withStops.length > 0 || withLive.length > 0,
-    loading: datas.some((d) => d === null) || withStops.some((c) => loading.has(c)),
-    failed: withStops.some((c, k) => datas[k] === false), // 有縣市的資料抓不到
+    covered: withStops.length > 0 || withAddr.length > 0 || withLive.length > 0,
+    loading: datas.some((d) => d === null) || withStops.some((c) => loading.has(c)) || addrLoading,
+    failed: withStops.some((c, k) => datas[k] === false) || addrFailed, // 有縣市的資料抓不到
   };
 }
 

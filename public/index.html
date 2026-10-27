@@ -1168,7 +1168,7 @@
       routeTruck = null; // 換地點查詢，之前打開的路線不算了
       markGarbagePoints(r.points);
       updateTrucks(r);
-      if (!r.covered) return '<span class="muted">這附近的縣市沒有公開垃圾車資料（目前有：台北、新北、基隆、高雄的清運時間，以及新北、台中、台南、高雄的垃圾車即時位置），請洽當地清潔隊或環保局。</span>';
+      if (!r.covered) return '<span class="muted">這附近的縣市沒有公開垃圾車資料（目前有：台北、新北、基隆、宜蘭、台中、新竹市、高雄的清運時間，以及新北、台中、台南、高雄的垃圾車即時位置），請洽當地清潔隊或環保局。</span>';
       return `<div class="garbage-list">${garbageListHtml(r)}</div><div class="garbage-route"></div>
         <p class="hint">「預計」是依垃圾車即時位置推算（目前只有新北）；高雄是環保局的今日預估；其他為表定時間，遇假日、颱風可能異動。</p>`;
     }
@@ -1176,6 +1176,7 @@
     // 地圖上的丟垃圾地點：點開看幾點有車
     function markGarbagePoints(points) {
       for (const pt of points) {
+        if (pt.lat == null) continue; // 只有地址的點不標
         L.marker([pt.lat, pt.lng], { icon: L.divIcon({ className: '', html: '<div style="font-size:20px">🗑️</div>', iconSize: [24, 24] }) })
           .bindPopup(`<b>${esc(pt.name)}</b><br>${pt.passes.map((x) => `${esc(x.start)}　${esc(x.route)}`).join('<br>')}`).addTo(nearbyLayer);
       }
@@ -1195,20 +1196,22 @@
       const head = n
         ? `<div class="garbage-next">
             <div class="big">🚛 ${esc(n.when)}${n.soon >= 0 ? `（還有 ${n.soon} 分鐘）` : '（快到了）'}</div>
-            <div>到「${esc(n.name)}」・離你 ${meters(n.distance)}</div>
+            <div>到「${esc(n.name)}」・${n.distance != null ? `離你 ${meters(n.distance)}` : esc(r.points.find((pt) => pt.name === n.name)?.approx || '')}</div>
             <div>${n.progress ? progressText(n.progress) : '垃圾車還沒出發（或這個縣市沒有即時位置），時間為表定'}</div>
             ${fav}
           </div>`
         : `<div class="garbage-next"><div class="big">今天附近沒有垃圾車了</div><div>下面是每個地點的收運時間。</div>${fav}</div>`;
       const list = `<p><b>🗑️ 附近固定丟垃圾的地點</b></p>${r.points.map((pt) => item(
-        `<b>${esc(pt.name)}</b>・${meters(pt.distance)}${goButton(pt, pt.name)}`,
+        `<b>${esc(pt.name)}</b>・${pt.distance != null ? `${meters(pt.distance)}${goButton(pt, pt.name)}` : esc(pt.approx)}`,
         pt.passes.map((x) => `${esc(x.when)}・${esc(x.route)}${x.days ? `（${esc(x.days)}）` : ''}${x.progress ? `<br>${progressText(x.progress)}` : ''}
-          <button type="button" class="link" data-garbage-line="${esc(x.line)}" data-garbage-stop="${esc(pt.name)}">看進度</button>`).join('<br>'),
-        pt)).join('')}`;
+          ${x.line ? `<button type="button" class="link" data-garbage-line="${esc(x.line)}" data-garbage-stop="${esc(pt.name)}">看進度</button>` : ''}${x.note ? `<br><span class="muted">${esc(x.note)}</span>` : ''}`).join('<br>'),
+        pt.lat != null ? pt : null)).join('')}`;
       const live = r.trucks.length || r.points.some((pt) => pt.passes.some((x) => x.progress))
         ? `<p class="hint">🔴 垃圾車位置每 30 秒自動更新（${time}），地圖上的 🚛 會跟著移動。</p>`
         : '<p class="hint">附近現在沒有正在開的垃圾車，出車後會自動出現在地圖上。</p>';
-      return head + list + (r.loading ? '<p class="hint">⏳ 還有部分資料下載中，會自動更新。</p>' : '') + live;
+      const approx = r.points.some((pt) => pt.lat == null)
+        ? '<p class="hint">這個縣市的資料只有地址、沒有座標，依你查的地點所在的里、路名比對，請以現場為準。</p>' : '';
+      return head + list + approx + (r.loading ? '<p class="hint">⏳ 還有部分資料下載中，會自動更新。</p>' : '') + live;
     }
 
     // 下一台的路程進度自動打開（使用者自己點了別台就不換）
