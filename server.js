@@ -10,7 +10,7 @@ import { planCoach } from './coach.js';
 import { lockersNear } from './lockers.js';
 import { toiletsNear, warmUp as warmUpToilets } from './toilets.js';
 import { garbageNear, garbageRoute, warmUp as warmUpGarbage } from './garbage.js';
-import { planRail, railStations, warmUp as warmUpRail } from './rail.js';
+import { planRail, railStations } from './rail.js';
 import { tdx, hasTdx, taipeiNow } from './tdx.js';
 import { planMetro, metroMap } from './metro.js';
 
@@ -951,11 +951,7 @@ app.get('/api/rail/stations', wrap(async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`公共交通地圖：http://localhost:${PORT}${DEMO ? '（YouBike 示範模式）' : ''}`);
-  if (hasTdx()) {
-    warmUpRail()
-      .then(() => console.log('已載入今天的台鐵、高鐵時刻表'))
-      .catch((e) => console.log('火車時刻表載入失敗：', e.message));
-  }
+  // 台鐵、高鐵時刻表不在啟動時下載（免費主機常休眠重開，每次都抓會超過 TDX 用量），有人查火車時才下載
   warmUpCameras()
     .then((list) => console.log(`已載入 ${list.length} 個測速照相點`))
     .catch((e) => console.log('測速照相資料載入失敗：', e.message));

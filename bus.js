@@ -677,10 +677,6 @@ export const stillLoading = (points) => sourcesFor(points).some((s) => loading.h
 
 // 啟動時先載入，第一次查詢才不會等太久
 // 公路客運全台一份、第一次要抓約半分鐘，有金鑰就在背景先載入（含時刻表）
-export const warmUp = () => {
-  if (hasTdx()) {
-    getTdxNetwork(INTERCITY).catch((e) => console.log('公路客運資料載入失敗：', e.message));
-    loadTimetables();
-  }
-  return Promise.all([getNetwork(), getTaipeiEta()]);
-};
+// 公路客運（路線約 18 MB、班表約 57 MB）不在啟動時下載：免費主機常休眠重開、沒有永久硬碟，
+// 每次啟動都重抓會超過 TDX 用量，改成有人查客運時才下載
+export const warmUp = () => Promise.all([getNetwork(), getTaipeiEta()]);
