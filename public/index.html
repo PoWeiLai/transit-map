@@ -79,6 +79,8 @@
     .filters button.on { background:var(--fg); color:var(--bg); }
     .tabs button.on { background:var(--fg); color:var(--bg); border-color:var(--fg); font-weight:600; }
     .tabs button.svc { border:2px solid #f59e0b; font-weight:600; }
+    ol.steps { margin:4px 0 8px; padding-left:22px; }
+    ol.steps li { margin:2px 0; }
     body.lookup .route-only { display:none !important; }
     .garbage-next { padding:10px; border-radius:8px; background:#fef3c7; color:#111; margin-bottom:8px; }
     .garbage-next .big { font-size:22px; font-weight:700; }
@@ -515,10 +517,53 @@
         ${pick ? `<h2>📍 直接在地圖上點「${esc(q)}」的位置</h2>
           <p>把地圖移到那附近，點一下正確的位置，就會自動填入並繼續${pick.key === 'place' ? '查詢' : '規劃'}。</p>
           <button type="button" class="primary" id="pickOnMap">到地圖上點選</button>` : ''}
-        <div class="links"><a target="_blank" rel="noopener" href="https://www.google.com/maps/search/${encodeURIComponent(q)}">🔎 在 Google 地圖搜尋「${esc(q)}」</a></div>
-        <p class="hint">也可以在 Google 地圖找到地點後按「分享」→「複製連結」，貼回欄位再查一次；或貼上座標（例如 24.13702, 120.64192）。</p>
+        <h2>🔎 或用 Google 地圖找</h2>
+        <ol class="steps">
+          <li><a target="_blank" rel="noopener" href="https://www.google.com/maps/search/${encodeURIComponent(q)}">在 Google 地圖搜尋「${esc(q)}」</a></li>
+          <li>找到地點後按「分享」→「複製連結」</li>
+          <li>回到這裡（iPhone 按左上角「◀」），按下面的按鈕</li>
+        </ol>
+        ${pick ? '<button type="button" class="primary" id="pasteGoogle">📋 貼上 Google 地圖的位置</button>' : ''}
+        <p class="hint">也可以把連結或座標（例如 24.13702, 120.64192）貼回欄位再查一次。</p>
       </div>`;
     }
+    // 從剪貼簿讀 Google 地圖連結（要使用者按按鈕才讀得到）；讀不到就請使用者貼上
+    async function pasteGoogle() {
+      if (!pendingPick) return;
+      let text = '';
+      try { text = await navigator.clipboard.readText(); } catch { /* 瀏覽器不允許讀剪貼簿 */ }
+      if (!/google|goo\.gl|\d+\.\d+\s*[,，]\s*\d+\.\d+/i.test(text)) text = prompt('貼上從 Google 地圖複製的連結（或座標）') || '';
+      if (!text.trim()) return;
+      show('<div class="card muted">讀取 Google 地圖的位置…</div>');
+      const [found] = await api('/api/geocode?q=' + encodeURIComponent(text.trim())).catch(() => []);
+      if (!found) {
+        show(`<div class="card err">讀不到這個連結的位置，請確認是從 Google 地圖「分享」→「複製連結」複製的。</div>${googleFix(pendingPick.text, pendingPick)}`);
+        return;
+      }
+      fillPick(found.lat, found.lng);
+    }
+
+    // 把位置填回查不到的那個欄位，繼續規劃／查詢（名稱保留使用者輸入的文字）
+    function fillPick(lat, lng) {
+      const { key, stop, text } = pendingPick;
+      pendingPick = null;
+      const point = { lat, lng, name: text };
+      if (key === 'place') { placePoint = point; $('place').value = text; $('form').requestSubmit(); return; }
+      if (key) { points[key] = point; $(key).value = text; }
+      if (stop) { stop.point = point; stop.el.value = text; }
+      resetChoices();
+      plan();
+    }
+
+    // 從 Google 地圖切回來時，提醒按貼上
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible' || !pendingPick) return;
+      const b = $('pasteGoogle');
+      if (!b) return;
+      b.textContent = '📋 回來了！按這裡貼上 Google 地圖的位置';
+      b.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+
     // 查不到時記下是哪個欄位
     async function lookupFor(pick, text, emptyMsg, near) {
       try { return await lookup(text, emptyMsg, near); } catch (err) { if (err.query) err.pick = pick; throw err; }
@@ -1369,6 +1414,7 @@
       }
     }
     $('out').addEventListener('click', (e) => {
+      if (e.target.id === 'pasteGoogle') { pasteGoogle(); return; }
       if (e.target.id === 'pickOnMap') {
         if (isPhone()) setFormHidden(true);
         $('map').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -2197,14 +2243,7 @@
     map.on('click', (e) => {
       const { lat, lng } = e.latlng;
       if (pendingPick) {
-        const { key, stop, text } = pendingPick;
-        pendingPick = null;
-        const point = { lat, lng, name: text };
-        if (key === 'place') { placePoint = point; $('place').value = text; $('form').requestSubmit(); return; }
-        if (key) { points[key] = point; $(key).value = text; }
-        if (stop) { stop.point = point; stop.el.value = text; }
-        resetChoices();
-        plan();
+        fillPick(lat, lng);
         return;
       }
       if (document.body.classList.contains('lookup')) {
