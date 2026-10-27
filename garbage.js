@@ -1,14 +1,19 @@
-// 垃圾車：各縣市環保局的清運點與表定經過時間，加上垃圾車即時位置。
-// 全國沒有統一的開放資料，有公開的縣市才查得到（表定：台北、新北、基隆、高雄；即時位置：新北、台中、台南、高雄）
+// 垃圾車：各縣市環保局的清運點（固定丟垃圾的地點）與表定經過時間，加上垃圾車即時位置。
+// 全國沒有統一的開放資料，有公開的縣市才查得到（表定：台北、新北、基隆、高雄；即時位置：新北、台中、台南、高雄）。
+// 只下載查詢地點所在縣市的資料；還在下載就先回覆「下載中」，不讓查詢卡住
 import { daily, cached, taipeiNow, toMinutes } from './tdx.js';
 import { distance } from './geo.js';
+import { citiesAt } from './cities.js';
 
-const NEAR_M = 600;        // 清運點多遠內
-const COVER_M = 3000;      // 這麼遠內完全沒有清運點，就當作這個縣市沒有公開資料
-const TRUCK_NEAR_M = 2000; // 即時位置：附近多遠內的車
+const NEAR_M = 600;         // 清運點多遠內
+const TRUCK_NEAR_M = 2000;  // 即時位置：附近多遠內的車
 const TRUCK_FRESH_MIN = 20; // 太久沒回報的車（多半已收班）不列
 const LIVE_MS = 60 * 1000;
-const MAX_STOPS = 6;
+const MAX_POINTS = 8;
+const LOAD_WAIT_MS = 8000;  // 查詢時最多等資料這麼久，其餘在背景下載
+const LIVE_WAIT_MS = 6000;
+const FETCH_MS = 45000;
+const KCG_PARALLEL = 6;     // 高雄各區資料一次同時抓幾份
 const DAYS = '日一二三四五六';
 // 台北市週三、週日停收一般垃圾
 const TAIPEI_DAYS = [1, 2, 4, 5, 6].reduce((m, d) => m | (1 << d), 0);
@@ -30,7 +35,7 @@ const KAOHSIUNG = ['53fa3c3d-19a6-4bed-b864-9ae8e3734f7b', 'e983ab14-395e-438d-8
 const KCG = (id) => `https://openapi.kcg.gov.tw/Api/Service/Get/${id}`;
 
 async function get(url, type = 'json') {
-  const res = await fetch(url, { signal: AbortSignal.timeout(90000), headers: { 'User-Agent': 'Mozilla/5.0 transit-map' } });
+  const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_MS), headers: { 'User-Agent': 'Mozilla/5.0 transit-map' } });
   if (!res.ok) throw new Error(`垃圾車資料 ${res.status}`);
   return type === 'json' ? res.json() : (await res.text()).replace(/^﻿/, '');
 }
@@ -54,68 +59,73 @@ function parseCsv(text) {
 }
 
 const hhmm = (s) => (/^\d{3,4}$/.test(s) ? `${s.padStart(4, '0').slice(0, 2)}:${s.padStart(4, '0').slice(2)}` : s);
-const stop = (city, route, name, lat, lng, start, end = '', days = null, note = '') => {
+const minText = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(Math.round(m) % 60).padStart(2, '0')}`;
+// city：TDX 縣市代碼；line：同一條路線的 key（新北用路線編號，和即時位置對得上）
+const stop = (city, route, name, lat, lng, start, end = '', days = null, note = '', line = '', rank = null) => {
   lat = Number(lat); lng = Number(lng);
   return Number.isFinite(lat) && Number.isFinite(lng) && lat > 21 && lat < 27 && /^\d{1,2}:\d{2}$/.test(start)
-    ? { city, route, name, lat, lng, start, end, days, note } : null;
+    ? { city, route, name, lat, lng, start, end, days, note, line: line || `${city}:${route}`, rank } : null;
 };
 
-// 各縣市的清運點，抓不到的縣市略過（其他縣市照常）
+// 同時最多跑 n 個
+async function pool(items, n, fn) {
+  const out = [];
+  let k = 0;
+  await Promise.all(Array.from({ length: n }, async () => {
+    while (k < items.length) { const i = k++; out[i] = await fn(items[i]); }
+  }));
+  return out;
+}
+
+// 各縣市的清運點（固定丟垃圾的地點），用 TDX 縣市代碼
 const SOURCES = {
-  async 臺北市() {
+  async Taipei() {
     const rows = parseCsv(await get('https://data.taipei/api/dataset/6bb3304b-4f46-4bb0-8cd1-60c66dcd1cae/resource/a6e90031-7ec4-4089-afb5-361a4efe7202/download', 'text'));
-    return rows.map((r) => stop('臺北市', `${r['路線']} ${r['車次']}`, r['地點'], r['緯度'], r['經度'], hhmm(r['抵達時間']), hhmm(r['離開時間']), TAIPEI_DAYS, '週三、週日停收'));
+    return rows.map((r) => stop('Taipei', `${r['路線']} ${r['車次']}`, r['地點'], r['緯度'], r['經度'], hhmm(r['抵達時間']), hhmm(r['離開時間']), TAIPEI_DAYS, '週三、週日停收'));
   },
-  async 新北市() {
+  async NewTaipei() {
     const rows = parseCsv(await get('https://data.ntpc.gov.tw/api/datasets/edc3ad26-8ae7-4916-a00b-bc6048d19bf8/csv/file', 'text'));
     const en = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     return rows.map((r) => {
       const bits = (kind) => en.reduce((m, d, k) => (r[`${kind}${d}`] === 'Y' ? m | (1 << k) : m), 0);
       const recycle = en.map((d, k) => (r[`recycling${d}`] === 'Y' ? DAYS[k] : '')).join('');
-      const s = stop('新北市', `${r.city} ${r.linename}`, r.name, r.latitude, r.longitude, r.time, '', bits('garbage') || null,
-        recycle ? `資源回收：星期${[...recycle].join('、')}` : '');
       // 路線編號跟即時位置的 lineid 一樣，用來算垃圾車現在的進度
-      return s && { ...s, line: `ntpc:${r.lineid}`, rank: Number(r.rank) };
+      return stop('NewTaipei', `${r.city} ${r.linename}`, r.name, r.latitude, r.longitude, r.time, '', bits('garbage') || null,
+        recycle ? `資源回收：星期${[...recycle].join('、')}` : '', `NewTaipei:${r.lineid}`, Number(r.rank));
     });
   },
-  async 基隆市() {
+  async Keelung() {
     const rows = parseCsv(await get('https://opendata-kl.askeycloud.com/route_klepb.csv', 'text'));
-    return rows.map((r) => stop('基隆市', r['清運路線名稱'], r['清運點'], r['緯度'], r['經度'], r['預估到達時間'], r['預估離開時間'], null,
+    return rows.map((r) => stop('Keelung', r['清運路線名稱'], r['清運點'], r['緯度'], r['經度'], r['預估到達時間'], r['預估離開時間'], null,
       r['回收日(星期幾)'] ? `資源回收：星期${r['回收日(星期幾)'].split(',').map((d) => DAYS[Number(d) % 7]).join('、')}` : ''));
   },
-  async 高雄市() {
-    const out = [];
-    for (const id of KAOHSIUNG) { // 依序抓，避免同時打太多
-      const body = await get(KCG(id)).catch(() => null);
-      for (const r of body?.data || []) {
-        const [s, e] = String(r['停留時間'] || '').split('-');
-        out.push(stop('高雄市', `${r['行政區']} ${r['責任區']}責任區 第${r['車次']}車`, r['停留地點'], r['緯度'], r['經度'], s, e, null,
-          r['回收日'] ? `資源回收：星期${r['回收日']}` : ''));
-      }
-    }
-    return out;
+  async Kaohsiung() {
+    const bodies = await pool(KAOHSIUNG, KCG_PARALLEL, (id) => get(KCG(id)).catch(() => null));
+    if (!bodies.some(Boolean)) throw new Error('高雄各區資料都抓不到');
+    return bodies.flatMap((b) => (b?.data || []).map((r) => {
+      const [s, e] = String(r['停留時間'] || '').split('-');
+      return stop('Kaohsiung', `${r['行政區']} ${r['責任區']}責任區 第${r['車次']}車`, r['停留地點'], r['緯度'], r['經度'], s, e, null,
+        r['回收日'] ? `資源回收：星期${r['回收日']}` : '');
+    }));
   },
 };
 
-// 每個清運點屬於一條路線（line），路線上的點依順序（新北有清運序，其他依表定時間）
-const allStops = () => daily('garbage-stops-v2', async () => {
-  const lists = await Promise.all(Object.entries(SOURCES).map(([city, fn]) =>
-    fn().catch((e) => { console.log(`${city}垃圾車資料載入失敗：`, e.message); return []; })));
-  return lists.flat().filter(Boolean).map((s) => ({ ...s, line: s.line || `${s.city}:${s.route}` }));
+// 一個縣市的清運點，依路線排好順序（新北有清運序，其他依表定時間）
+const loading = new Set();
+const cityData = (city) => cached(`garbage-index:${city}:${taipeiNow().date}`, 24 * 60 * 60 * 1000, () => {
+  const value = daily(`garbage-${city}`, async () => (await SOURCES[city]()).filter(Boolean)).then((stops) => {
+    const lines = new Map();
+    for (const s of stops) (lines.get(s.line) || lines.set(s.line, []).get(s.line)).push(s);
+    for (const list of lines.values()) list.sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0) || toMinutes(a.start) - toMinutes(b.start));
+    return { stops, lines };
+  });
+  loading.add(city);
+  value.catch((e) => console.log(`${city} 垃圾車資料載入失敗：`, e.message)).finally(() => loading.delete(city));
+  return value; // 失敗不快取，下次查詢再試
 });
 
-// 路線 → 依順序排好的清運點
-let routeIndex = { from: null, map: new Map() };
-async function routes() {
-  const stops = await allStops();
-  if (routeIndex.from !== stops) {
-    const map = new Map();
-    for (const s of stops) (map.get(s.line) || map.set(s.line, []).get(s.line)).push(s);
-    for (const list of map.values()) list.sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0) || toMinutes(a.start) - toMinutes(b.start));
-    routeIndex = { from: stops, map };
-  }
-  return routeIndex.map;
-}
+// 最多等 ms，逾時回傳 fallback（原本的工作繼續在背景跑完）
+const within = (promise, ms, fallback) => Promise.race([promise, new Promise((r) => setTimeout(() => r(fallback), ms))]);
 
 // 高雄市今天的預估到點時間（依垃圾車實際進度推算），用行政區＋地點對應清運點
 const kaohsiungEta = () => cached('garbage-kcg-eta', 5 * 60 * 1000, async () => {
@@ -134,26 +144,27 @@ function minutesAgo(text) {
 }
 
 const LIVE = {
-  新北市: async () => (await get('https://data.ntpc.gov.tw/api/datasets/28ab4122-60e1-4065-98e5-abccb69aaca6/json?page=0&size=1000'))
-    .map((r) => ({ car: r.car, location: r.location, lat: +r.latitude, lng: +r.longitude, time: r.time, line: `ntpc:${r.lineid}` })),
-  臺中市: async () => (await get('https://newdatacenter.taichung.gov.tw/api/v1/no-auth/resource.download?rid=c923ad20-2ec6-43b9-b3ab-54527e99f7bc'))
+  NewTaipei: async () => (await get('https://data.ntpc.gov.tw/api/datasets/28ab4122-60e1-4065-98e5-abccb69aaca6/json?page=0&size=1000'))
+    .map((r) => ({ car: r.car, location: r.location, lat: +r.latitude, lng: +r.longitude, time: r.time, line: `NewTaipei:${r.lineid}` })),
+  Taichung: async () => (await get('https://newdatacenter.taichung.gov.tw/api/v1/no-auth/resource.download?rid=c923ad20-2ec6-43b9-b3ab-54527e99f7bc'))
     .map((r) => ({ car: r.car, location: r.location, lat: +r.Y, lng: +r.X, time: r.time })),
-  臺南市: async () => ((await get('https://soa.tainan.gov.tw/Api/Service/Get/2c8a70d5-06f2-4353-9e92-c40d33bcd969')).data || [])
+  Tainan: async () => ((await get('https://soa.tainan.gov.tw/Api/Service/Get/2c8a70d5-06f2-4353-9e92-c40d33bcd969')).data || [])
     .map((r) => ({ car: r.car, location: r.location, lat: +r.y, lng: +r.x, time: r.time })),
-  高雄市: async () => ((await get(KCG('aaf4ce4b-4ca8-43de-bfaf-6dc97e89cac0'))).data || [])
+  Kaohsiung: async () => ((await get(KCG('aaf4ce4b-4ca8-43de-bfaf-6dc97e89cac0'))).data || [])
     .map((r) => ({ car: r.car, location: r.location, lat: +r.y, lng: +r.x, time: r.time })),
 };
 
-const liveTrucks = () => cached('garbage-live', LIVE_MS, async () => {
-  const lists = await Promise.all(Object.values(LIVE).map((fn) => fn().catch(() => [])));
-  return lists.flat().filter((t) => Number.isFinite(t.lat) && Number.isFinite(t.lng));
-});
+// 一個縣市正在開的垃圾車（太久沒回報的不算）
+const liveTrucks = (city) => cached(`garbage-live:${city}`, LIVE_MS, async () => (await LIVE[city]())
+  .map((t) => ({ ...t, ago: minutesAgo(t.time) }))
+  .filter((t) => Number.isFinite(t.lat) && Number.isFinite(t.lng) && t.ago != null && t.ago >= -5 && t.ago <= TRUCK_FRESH_MIN)
+  .map((t) => ({ ...t, ago: Math.max(0, t.ago) })));
 
 // ---------- 查詢 ----------
 
 // 下一次經過：有星期資料就找今天（還沒過）或之後最近的一天，沒有就只給表定時間
 function nextPass(s, now, day) {
-  if (!s.days) return { when: `表定 ${s.start}`, soon: null };
+  if (!s.days) return { when: `每次 ${s.start}`, soon: null };
   for (let k = 0; k < 7; k++) {
     const d = (day + k) % 7;
     if (!((s.days >> d) & 1)) continue;
@@ -161,13 +172,10 @@ function nextPass(s, now, day) {
     const label = k === 0 ? '今天' : k === 1 ? '明天' : `星期${DAYS[d]}`;
     return { when: `${label} ${s.start}`, soon: k === 0 ? toMinutes(s.start) - now : null };
   }
-  return { when: `表定 ${s.start}`, soon: null };
+  return { when: `每次 ${s.start}`, soon: null };
 }
 
-const freshTrucks = async () => (await liveTrucks().catch(() => []))
-  .map((t) => ({ ...t, ago: minutesAgo(t.time) }))
-  .filter((t) => t.ago != null && t.ago >= -5 && t.ago <= TRUCK_FRESH_MIN)
-  .map((t) => ({ ...t, ago: Math.max(0, t.ago) }));
+const daysText = (bits) => (bits ? `星期${[...DAYS].filter((_, d) => (bits >> d) & 1).join('、')}` : '');
 
 // 垃圾車現在的進度：用即時位置找出它在路線上的哪一站，比表定晚／早多少，推算到 mine 這站的時間
 function progressOf(list, truck, mine, now) {
@@ -176,52 +184,58 @@ function progressOf(list, truck, mine, now) {
   list.forEach((s, k) => { if (distance(truck, s) < distance(truck, list[at])) at = k; });
   const late = now - toMinutes(list[at].start); // 正的是比表定晚
   const left = mine - at;
-  const eta = left > 0 ? toMinutes(list[mine].start) + late : null;
   return {
     at: list[at].name, atIndex: at, left, late,
-    eta: eta != null ? `${String(Math.floor(eta / 60) % 24).padStart(2, '0')}:${String(Math.round(eta) % 60).padStart(2, '0')}` : null,
+    eta: left > 0 ? minText(toMinutes(list[mine].start) + late) : null,
     car: truck.car, location: truck.location, ago: truck.ago, lat: truck.lat, lng: truck.lng,
   };
 }
 
+// point 附近：固定丟垃圾的地點（清運點），每個點有哪些垃圾車、幾點經過、現在到哪；附近正在開的垃圾車
 export async function garbageNear(point) {
-  const [stops, trucks, eta, byLine] = await Promise.all([
-    allStops().catch(() => []),
-    freshTrucks(),
-    kaohsiungEta().catch(() => new Map()),
-    routes().catch(() => new Map()),
+  const cities = citiesAt([point]);
+  const withStops = cities.filter((c) => SOURCES[c]);
+  const withLive = cities.filter((c) => LIVE[c]);
+  const [datas, lives, eta] = await Promise.all([
+    Promise.all(withStops.map((c) => within(cityData(c).catch(() => false), LOAD_WAIT_MS, null))),
+    Promise.all(withLive.map((c) => within(liveTrucks(c).catch(() => []), LIVE_WAIT_MS, []))),
+    withStops.includes('Kaohsiung') ? within(kaohsiungEta().catch(() => new Map()), LIVE_WAIT_MS, new Map()) : new Map(),
   ]);
+  const trucks = lives.flat();
   const truckOf = new Map(trucks.filter((t) => t.line).map((t) => [t.line, t]));
   const { minutes: now, date } = taipeiNow();
   const day = new Date(`${date}T00:00:00Z`).getUTCDay();
 
-  let covered = false;
-  const near = [];
-  for (const s of stops) {
-    const d = distance(point, s);
-    if (d <= COVER_M) covered = true;
-    if (d <= NEAR_M) near.push({ ...s, distance: Math.round(d) });
+  // 同一個地點（同名、20 公尺內）的各路線合併成一個丟垃圾地點
+  const points = [];
+  for (const d of datas) {
+    if (!d) continue;
+    for (const s of d.stops) {
+      const dist = distance(point, s);
+      if (dist > NEAR_M) continue;
+      let p = points.find((x) => x.name === s.name && distance(x, s) < 20);
+      if (!p) points.push(p = { name: s.name, lat: s.lat, lng: s.lng, distance: Math.round(dist), passes: [] });
+      if (p.passes.some((x) => x.line === s.line && x.start === s.start)) continue;
+      const route = d.lines.get(s.line) || [];
+      const mine = route.indexOf(s);
+      const progress = mine >= 0 ? progressOf(route, truckOf.get(s.line), mine, now) : null;
+      const next = nextPass(s, now, day);
+      const estimate = s.city === 'Kaohsiung' ? eta.get(`${s.route.split(' ')[0]}|${s.name}`) : null;
+      const soonAt = progress?.eta || estimate;
+      p.passes.push({
+        route: s.route, line: s.line, start: s.start, end: s.end, days: daysText(s.days), note: s.note,
+        when: progress?.eta ? `預計 ${progress.eta}（表定 ${s.start}）` : estimate ? `今天預估 ${estimate}（表定 ${s.start}）` : next.when,
+        soon: soonAt ? toMinutes(soonAt) - now : next.soon,
+        progress,
+      });
+    }
   }
-  near.sort((a, b) => a.distance - b.distance);
-  // 同一條路線只留最近的清運點，依下一次經過時間排序
-  const seen = new Set();
-  const list = near.filter((s) => !seen.has(s.route) && seen.add(s.route)).slice(0, MAX_STOPS).map((s) => {
-    const next = nextPass(s, now, day);
-    const area = s.route.split(' ')[0];
-    const estimate = s.city === '高雄市' ? eta.get(`${area}|${s.name}`) : null; // 今天依車子實際進度的預估
-    // 新北：路線上的垃圾車正在跑，就算出它現在到哪、幾點會到這裡
-    const route = byLine.get(s.line) || [];
-    const mine = route.findIndex((x) => x.name === s.name && x.start === s.start);
-    const progress = mine >= 0 ? progressOf(route, truckOf.get(s.line), mine, now) : null;
-    const when = progress?.eta ? `預計 ${progress.eta}（表定 ${s.start}）`
-      : estimate ? `今天預估 ${estimate}（表定 ${s.start}）` : next.when;
-    const soonAt = progress?.eta || estimate;
-    return {
-      city: s.city, route: s.route, line: s.line, name: s.name, distance: s.distance, lat: s.lat, lng: s.lng,
-      start: s.start, end: s.end, when, progress,
-      soon: soonAt ? toMinutes(soonAt) - now : next.soon, note: s.note,
-    };
-  }).sort((a, b) => (a.soon ?? 9999) - (b.soon ?? 9999));
+  for (const p of points) p.passes.sort((a, b) => (a.soon ?? 9999) - (b.soon ?? 9999) || toMinutes(a.start) - toMinutes(b.start));
+  // 近的地點在前（最近的幾個），每個地點下一台最快的排前面
+  points.sort((a, b) => a.distance - b.distance);
+  const shown = points.slice(0, MAX_POINTS);
+  const next = shown.flatMap((p) => p.passes.map((x) => ({ ...x, name: p.name, distance: p.distance })))
+    .filter((x) => x.soon != null && x.soon >= -2).sort((a, b) => a.soon - b.soon)[0] || null;
 
   const nearTrucks = trucks
     .map((t) => ({ ...t, distance: Math.round(distance(point, t)) }))
@@ -230,21 +244,33 @@ export async function garbageNear(point) {
     .slice(0, 5)
     .map(({ car, location, distance: d, ago, lat, lng }) => ({ car, location, distance: d, ago, lat, lng }));
 
-  return { stops: list, trucks: nearTrucks, covered: covered || nearTrucks.length > 0 };
-}
-
-// 一條路線的所有清運點（依順序）與垃圾車現在的位置，畫面列出整條路線的進度
-export async function garbageRoute(line) {
-  const [byLine, trucks] = await Promise.all([routes(), freshTrucks()]);
-  const list = byLine.get(line);
-  if (!list) return null;
-  const truck = trucks.find((t) => t.line === line);
-  const progress = progressOf(list, truck, list.length - 1, taipeiNow().minutes);
   return {
-    route: list[0].route, city: list[0].city,
-    stops: list.map(({ name, lat, lng, start, end }) => ({ name, lat, lng, start, end })),
-    progress,
+    points: shown,
+    next,
+    trucks: nearTrucks,
+    covered: withStops.length > 0 || withLive.length > 0,
+    loading: datas.some((d) => d === null) || withStops.some((c) => loading.has(c)),
   };
 }
 
-export const warmUp = () => allStops();
+// 一條路線的所有清運點（依順序）與垃圾車現在的位置
+export async function garbageRoute(line) {
+  const city = line.split(':')[0];
+  if (!SOURCES[city]) return null;
+  const [d, trucks] = await Promise.all([
+    within(cityData(city).catch(() => null), LOAD_WAIT_MS, null),
+    LIVE[city] ? within(liveTrucks(city).catch(() => []), LIVE_WAIT_MS, []) : [],
+  ]);
+  const list = d?.lines.get(line);
+  if (!list) return null;
+  const truck = trucks.find((t) => t.line === line);
+  return {
+    route: list[0].route,
+    stops: list.map(({ name, lat, lng, start, end }) => ({ name, lat, lng, start, end })),
+    progress: progressOf(list, truck, list.length - 1, taipeiNow().minutes),
+  };
+}
+
+// 啟動時在背景先下載雙北（查詢最多），不等它
+export const warmUp = () => Promise.all(['NewTaipei', 'Taipei'].map((c) => cityData(c).then((d) => d.stops)))
+  .then((lists) => lists.flat());
