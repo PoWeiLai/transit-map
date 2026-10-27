@@ -1186,6 +1186,7 @@
       const time = new Date(Date.now() + 8 * 3600000).toISOString().slice(11, 16);
       const fav = favButton();
       if (!r.points.length) {
+        if (r.failed && !r.loading) return '<span class="muted">這個縣市的垃圾車資料暫時抓不到（環保局網站沒有回應），請過一段時間再查。</span>';
         return r.loading
           ? `<div class="garbage-next"><div class="big">⏳ 垃圾車資料下載中</div><div>第一次查這個縣市要等一下（約 1 分鐘），會自動重新整理。</div></div>`
           : `<span class="muted">600 公尺內沒有固定丟垃圾的地點（清運點）資料，換個地點或點地圖上其他位置試試。</span>${fav}`;

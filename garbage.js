@@ -110,9 +110,12 @@ const SOURCES = {
   },
 };
 
-// 一個縣市的清運點，依路線排好順序（新北有清運序，其他依表定時間）
+// 一個縣市的清運點，依路線排好順序（新北有清運序，其他依表定時間）。
+// 下載失敗（例如政府網站對國外主機沒有回應）就記下來，30 分鐘內不再重試，畫面直接說抓不到
+const RETRY_MS = 30 * 60 * 1000;
 const loading = new Set();
-const cityData = (city) => cached(`garbage-index:${city}:${taipeiNow().date}`, 24 * 60 * 60 * 1000, () => {
+const failedAt = new Map();
+const cityData = (city) => (Date.now() - (failedAt.get(city) || 0) < RETRY_MS ? Promise.reject(new Error('剛剛抓不到')) : cached(`garbage-index:${city}:${taipeiNow().date}`, 24 * 60 * 60 * 1000, () => {
   const value = daily(`garbage-${city}`, async () => (await SOURCES[city]()).filter(Boolean)).then((stops) => {
     const lines = new Map();
     for (const s of stops) (lines.get(s.line) || lines.set(s.line, []).get(s.line)).push(s);
@@ -120,9 +123,10 @@ const cityData = (city) => cached(`garbage-index:${city}:${taipeiNow().date}`, 2
     return { stops, lines };
   });
   loading.add(city);
-  value.catch((e) => console.log(`${city} 垃圾車資料載入失敗：`, e.message)).finally(() => loading.delete(city));
-  return value; // 失敗不快取，下次查詢再試
-});
+  value.then(() => failedAt.delete(city), (e) => { failedAt.set(city, Date.now()); console.log(`${city} 垃圾車資料載入失敗：`, e.message); })
+    .finally(() => loading.delete(city));
+  return value; // 失敗不快取，30 分鐘後再試
+}));
 
 // 最多等 ms，逾時回傳 fallback（原本的工作繼續在背景跑完）
 const within = (promise, ms, fallback) => Promise.race([promise, new Promise((r) => setTimeout(() => r(fallback), ms))]);
@@ -250,6 +254,7 @@ export async function garbageNear(point) {
     trucks: nearTrucks,
     covered: withStops.length > 0 || withLive.length > 0,
     loading: datas.some((d) => d === null) || withStops.some((c) => loading.has(c)),
+    failed: withStops.some((c, k) => datas[k] === false), // 有縣市的資料抓不到
   };
 }
 
