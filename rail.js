@@ -1,12 +1,12 @@
 // 台鐵、高鐵：找離出發點／目的地最近的車站，列出接下來能搭的班次
 import { distance } from './geo.js';
-import { tdx, daily, weekly, cached, taipeiNow, toMinutes } from './tdx.js';
+import { tdx, daily, weekly, cached, remembered, taipeiNow, toMinutes } from './tdx.js';
 
 const MAX_TRAINS = 12;
 const LIVE_MS = 2 * 60 * 1000;
 const SEAT_MS = 5 * 60 * 1000;
 const SEAT_TIMEOUT_MS = 8000; // 座位只是參考資訊，TDX 額度用完時不要讓整個規劃卡住
-const FARE_MS = 24 * 60 * 60 * 1000;
+const FARE_DAYS = 30; // 票價很少調整，存在 Turso 一個月
 const ACCESS_GUESS_MIN = 30; // 估計到站時間：到車站與等車大約多久
 // 台鐵票價的 TrainType：1 太魯閣、2 普悠瑪、3 自強、11 自強（3000）同價；4 莒光；5 復興、6 區間、10 區間快同價；7 普快
 const TRA_FARE_TYPE = { 太魯閣: [1], 普悠瑪: [2], 自強: [3, 11], 莒光: [4], 復興: [5], 區間: [6], 區間快: [10], 普快: [7] };
@@ -58,14 +58,14 @@ const SYSTEMS = {
     // 台鐵即時誤點（分鐘）
     async delays() {
       return cached('tra-live', LIVE_MS, async () => {
-        const { TrainLiveBoards } = await tdx('v3/Rail/TRA/TrainLiveBoard');
+        const { TrainLiveBoards } = await tdx('v3/Rail/TRA/TrainLiveBoard', {}, { live: true });
         return new Map(TrainLiveBoards.map((b) => [b.TrainNo, b.DelayTime]));
       }).catch(() => new Map()); // 額度用完時不顯示誤點，規劃照樣可用
     },
     // 單程票價依車種不同；回傳 車種 → { full: { standard }, concession: { standard } }。
     // 同一對車站有順、逆行兩種里程（例如經南迴），取近的那個
     async fareOf(originId, destId, type) {
-      const list = await cached(`tra-fare:${originId}-${destId}`, FARE_MS, async () =>
+      const list = await remembered(`tra-fare:${originId}-${destId}`, FARE_DAYS, async () =>
         (await tdx(`v3/Rail/TRA/ODFare/${originId}/to/${destId}`)).ODFares);
       const codes = TRA_FARE_TYPE[type] || TRA_FARE_TYPE['區間'];
       const f = list.filter((x) => codes.includes(x.TrainType)).sort((a, b) => a.TravelDistance - b.TravelDistance)[0];
@@ -117,7 +117,7 @@ const SYSTEMS = {
     // 剩餘座位：O 尚有座位、L 座位有限、X 已售完；回傳 車次 → 下車站 → 狀態
     async seats(stationId) {
       const job = cached(`thsr-seats:${stationId}`, SEAT_MS, async () => {
-        const { AvailableSeats } = await tdx(`v2/Rail/THSR/AvailableSeatStatusList/${stationId}`);
+        const { AvailableSeats } = await tdx(`v2/Rail/THSR/AvailableSeatStatusList/${stationId}`, {}, { live: true });
         return new Map(AvailableSeats.map((t) => [t.TrainNo, new Map(t.StopStations.map((s) =>
           [s.StationID, { standard: s.StandardSeatStatus, business: s.BusinessSeatStatus }]))]));
       });

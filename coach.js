@@ -1,9 +1,9 @@
 // 公路／國道客運：長途規劃（像火車一樣先接駁到客運站），以及票價、業者（電話、官網）、路線圖
-import { tdx, weekly, cached, taipeiNow } from './tdx.js';
+import { tdx, weekly, rememberedMany, taipeiNow } from './tdx.js';
 import { distance } from './geo.js';
 import { intercityData } from './bus.js';
 
-const FARE_MS = 24 * 60 * 60 * 1000;
+const FARE_DAYS = 30; // 票價很少調整，存在 Turso 一個月
 const FARE_BATCH = 40; // 一次查幾條路線的票價（全台一份太大，只查用得到的）
 
 // 路線 → 業者、路線圖；業者 → 電話、官網（各一天抓一次，資料不大）
@@ -23,14 +23,19 @@ function getFares(routeIds) {
   const stale = [...new Set(routeIds)].filter((id) => !fares.has(id));
   for (let k = 0; k < stale.length; k += FARE_BATCH) {
     const chunk = stale.slice(k, k + FARE_BATCH);
-    const job = cached(`coach-fare:${chunk.join(',')}`, FARE_MS, () => tdx('v2/Bus/RouteFare/InterCity', {
-      $filter: chunk.map((id) => `RouteID eq '${id}'`).join(' or '),
-      $select: 'RouteID,SubRouteID,StageFares',
-    }));
+    // 每條路線的票價存在 Turso，Turso 沒有的路線才向 TDX 查
+    const job = rememberedMany(chunk.map((id) => `coach-fare:${id}`), FARE_DAYS, async (keys) => {
+      const ids = keys.map((k) => k.slice('coach-fare:'.length));
+      const list = await tdx('v2/Bus/RouteFare/InterCity', {
+        $filter: ids.map((id) => `RouteID eq '${id}'`).join(' or '),
+        $select: 'RouteID,SubRouteID,StageFares',
+      });
+      return new Map(ids.map((id) => [`coach-fare:${id}`, list.filter((x) => x.RouteID === id)]));
+    });
     for (const id of chunk) {
-      const value = job.then((list) => {
+      const value = job.then((known) => {
         const out = {};
-        for (const r of list.filter((x) => x.RouteID === id)) {
+        for (const r of known.get(`coach-fare:${id}`)) {
           for (const s of r.StageFares || []) {
             const prices = (cls) => s.Fares.filter((f) => f.FareClass === cls && f.Price > 0).map((f) => f.Price);
             (out[`${r.SubRouteID}_${s.Direction}`] ||= []).push({

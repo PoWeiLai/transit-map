@@ -36,6 +36,7 @@ let ready = null;
 const init = () => (ready ||= pipeline([
   ['CREATE TABLE IF NOT EXISTS daily_cache (name TEXT NOT NULL, date TEXT NOT NULL, part INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (name, date, part))'],
   ['CREATE TABLE IF NOT EXISTS tdx_usage (date TEXT PRIMARY KEY, calls INTEGER NOT NULL, bytes INTEGER NOT NULL)'],
+  ['CREATE TABLE IF NOT EXISTS kv_cache (key TEXT PRIMARY KEY, data TEXT NOT NULL, at INTEGER NOT NULL)'],
 ]).catch((e) => { ready = null; throw e; }));
 
 // TDX 用量：每天累加呼叫次數與下載量
@@ -78,4 +79,38 @@ export async function save(name, date, data) {
     ...parts.map((part, k) => ['INSERT INTO daily_cache (name, date, part, data) VALUES (?, ?, ?, ?)', [name, date, k, part]]),
     ['DELETE FROM daily_cache WHERE date < ?', [oldest]],
   ]);
+}
+
+// ---------- 很少變動的小資料（票價、門牌座標）：一筆一個 key，存好幾個月 ----------
+const KV_KEEP_MS = 180 * 86400000;
+
+// 讀多個 key，只回傳 maxAgeMs 內存的：key → 資料
+export async function getKv(keys, maxAgeMs) {
+  if (!hasStore() || !keys.length) return new Map();
+  await init();
+  const [result] = await pipeline([[
+    `SELECT key, data FROM kv_cache WHERE at >= ? AND key IN (${keys.map(() => '?').join(',')})`,
+    [Date.now() - maxAgeMs, ...keys],
+  ]]);
+  return new Map(result.rows.map(([k, d]) => [k.value, JSON.parse(d.value)]));
+}
+
+// 寫：entries 是 [[key, 資料], …]，同時刪掉太舊的
+export async function setKv(entries) {
+  if (!hasStore() || !entries.length) return;
+  await init();
+  const now = Date.now();
+  await pipeline([
+    ...entries.map(([k, v]) => ['INSERT OR REPLACE INTO kv_cache (key, data, at) VALUES (?, ?, ?)', [k, JSON.stringify(v), now]]),
+    ['DELETE FROM kv_cache WHERE at < ?', [now - KV_KEEP_MS]],
+  ]);
+}
+
+// 這個月（month 例如 '2026-10'）到目前的 TDX 用量合計
+export async function monthUsage(month) {
+  if (!hasStore()) return null;
+  await init();
+  const [result] = await pipeline([['SELECT COALESCE(SUM(calls), 0), COALESCE(SUM(bytes), 0) FROM tdx_usage WHERE date LIKE ?', [`${month}-%`]]]);
+  const [c, b] = result.rows[0];
+  return { calls: Number(c.value), bytes: Number(b.value) };
 }

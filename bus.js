@@ -8,7 +8,8 @@ import { addCoachInfo } from './coach.js';
 const BASE = 'https://tcgbusfs.blob.core.windows.net/';
 const SOURCES = ['blobbus', 'ntpcbus']; // 台北市、新北市
 const STATIC_MS = 24 * 60 * 60 * 1000;  // 路線、站牌一天更新一次
-const ETA_MS = 30 * 1000;               // 到站時間 30 秒
+const ETA_MS = 60 * 1000;               // TDX 到站時間 60 秒更新一次（免費額度很少）
+const TAIPEI_ETA_MS = 30 * 1000;        // 雙北到站時間 30 秒（台北市開放資料，不用 TDX 額度）
 
 // 雙北以外的縣市用 TDX，只載入起訖點所在（含邊界附近相鄰）的縣市；跨縣市轉乘也找得到。
 // 雙北範圍：這裡面的查詢只用台北市、新北市資料（加上相鄰縣市）
@@ -20,7 +21,7 @@ const HIGHWAY_SPEED = 22;      // m/s，約時速 80 公里
 const DOWNLOAD_MS = 3 * 60 * 1000; // 路線站序檔案很大，下載逾時放寬
 const SCHEDULE_MS = 5 * 60 * 1000; // 客運時刻表全台一份約 57 MB
 const SCHEDULE_RETRY_MS = 10 * 60 * 1000; // 時刻表載入失敗，隔一段時間再試
-const ETA_BATCH = 80;          // 客運即時到站一次查幾條路線（只查起訖點附近的，免費金鑰每分鐘只能 5 次）
+const ETA_BATCH = 80;          // 即時到站一次查幾條路線（只查起訖點附近的，免費金鑰每分鐘只能 5 次）
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const DAY_S = 24 * 60 * 60;
 const LOAD_WAIT_MS = 8000;     // 查詢時最多等還沒載入的縣市這麼久，其餘在背景繼續載入，下次查詢就有
@@ -211,7 +212,7 @@ async function getNetworks(points) {
 let etaCache = { at: 0, data: new Map() };
 
 async function getTaipeiEta() {
-  if (Date.now() - etaCache.at < ETA_MS) return etaCache.data;
+  if (Date.now() - etaCache.at < TAIPEI_ETA_MS) return etaCache.data;
   try {
     const lists = await Promise.all(SOURCES.map((s) => getGz(`${s}/GetEstimateTime.gz`)));
     etaCache = { at: Date.now(), data: new Map(lists.flat().map((e) => [e.StopID, Number(e.EstimateTime)])) };
@@ -222,8 +223,6 @@ async function getTaipeiEta() {
 }
 
 // TDX 的 StopStatus：0 正常、1 尚未發車、2 交管不停靠、3 末班車已過、4 今日未營運，換成與雙北相同的代碼
-const lastTdxEta = new Map();
-
 const ETA_FIELDS = 'RouteUID,Direction,StopUID,EstimateTime,StopStatus';
 
 function addEta(list, data) {
@@ -237,52 +236,49 @@ function addEta(list, data) {
   return data;
 }
 
-function getTdxEta(source) {
-  return cached(`bus-eta:${source}`, ETA_MS, async () => {
-    const list = await tdx(`v2/Bus/EstimatedTimeOfArrival/City/${source}`, { $select: ETA_FIELDS });
-    const data = addEta(list, new Map());
-    lastTdxEta.set(source, data);
-    return data;
-  }).catch(() => lastTdxEta.get(source) || new Map()); // 抓不到沿用舊資料
-}
+// TDX 的到站資料（各縣市、公路／國道客運）整份很大，只查用得到的路線（起訖點附近），每條路線 ETA_MS 內不重抓
+const tdxEta = new Map();   // 資料來源 → 站牌 id → 到站時間
+const etaFetch = new Map(); // `${資料來源}:${RouteUID}` → { at, job }
 
-// 公路／國道客運的到站資料全台一份太大（約 15 MB），只查用得到的路線（起訖點附近），每條路線 30 秒內不重抓
-const intercityEta = new Map();   // 站牌 id → 到站時間
-const intercityFetch = new Map(); // RouteUID → { at, job }
-
-function getIntercityEta(routes) {
+function getRouteEta(source, routes) {
   const now = Date.now();
+  const data = tdxEta.get(source) || tdxEta.set(source, new Map()).get(source);
+  const path = source === INTERCITY ? `v2/Bus/EstimatedTimeOfArrival/${INTERCITY}` : `v2/Bus/EstimatedTimeOfArrival/City/${source}`;
   const wanted = [...new Set(routes)];
-  const stale = wanted.filter((r) => !(now - (intercityFetch.get(r)?.at || 0) < ETA_MS));
+  const stale = wanted.filter((r) => !(now - (etaFetch.get(`${source}:${r}`)?.at || 0) < ETA_MS));
   for (let k = 0; k < stale.length; k += ETA_BATCH) {
     const chunk = stale.slice(k, k + ETA_BATCH);
-    const job = tdx(`v2/Bus/EstimatedTimeOfArrival/${INTERCITY}`, {
+    const job = tdx(path, {
       $filter: chunk.map((r) => `RouteUID eq '${r}'`).join(' or '),
       $select: ETA_FIELDS,
-    }).then((list) => {
+    }, { live: true }).then((list) => {
       // 這幾條路線換成新資料（同一站取最快的，不跟舊資料比）
       const prefixes = chunk.map((r) => `${r}_`);
-      for (const id of intercityEta.keys()) if (prefixes.some((p) => id.startsWith(p))) intercityEta.delete(id);
-      addEta(list, intercityEta);
-    }).catch(() => chunk.forEach((r) => intercityFetch.delete(r))); // 抓不到沿用舊資料，下次重抓
-    chunk.forEach((r) => intercityFetch.set(r, { at: now, job }));
+      for (const id of data.keys()) if (prefixes.some((p) => id.startsWith(p))) data.delete(id);
+      addEta(list, data);
+    }).catch(() => chunk.forEach((r) => etaFetch.delete(`${source}:${r}`))); // 抓不到沿用舊資料，下次重抓
+    chunk.forEach((r) => etaFetch.set(`${source}:${r}`, { at: now, job }));
   }
-  return Promise.all(wanted.map((r) => intercityFetch.get(r)?.job)).then(() => intercityEta);
+  return Promise.all(wanted.map((r) => etaFetch.get(`${source}:${r}`)?.job)).then(() => data);
 }
 
-// 起訖點附近的客運路線（近的優先），決定要查哪些路線的即時到站
-const intercityRoutes = (hits) => [...new Set(hits
-  .filter((h) => h.line.source === INTERCITY)
-  .sort((a, b) => a.d - b.d)
-  .map((h) => h.line.route))].slice(0, ETA_BATCH);
+// 起訖點附近、TDX 資料的路線（近的優先），依資料來源分組，決定要查哪些路線的即時到站
+function nearRoutes(hits) {
+  const out = new Map(); // 資料來源 → RouteUID
+  for (const h of [...hits].sort((a, b) => a.d - b.d)) {
+    if (!h.line.source) continue; // 雙北的資料另外抓
+    const set = out.get(h.line.source) || out.set(h.line.source, new Set()).get(h.line.source);
+    if (set.size < ETA_BATCH) set.add(h.line.route);
+  }
+  return out;
+}
 
-// 各份資料的站牌 id 不會重複，合併成一個查詢；客運只查 routes 這幾條路線
-async function getEta(points, routes = []) {
+// 各份資料的站牌 id 不會重複，合併成一個查詢；TDX 的只查 routes（nearRoutes 的結果）這幾條路線
+async function getEta(routes = new Map()) {
   const maps = await Promise.all([
     getTaipeiEta(),
-    ...sourcesFor(points).filter((s) => s !== INTERCITY)
-      .map((s) => within(getTdxEta(s), ETA_WAIT_MS, lastTdxEta.get(s) || new Map())),
-    routes.length ? within(getIntercityEta(routes), ETA_WAIT_MS, intercityEta) : new Map(),
+    ...[...routes].map(([source, set]) =>
+      within(getRouteEta(source, set), ETA_WAIT_MS, tdxEta.get(source) || new Map())),
   ]);
   return { get: (id) => { for (const m of maps) if (m.has(id)) return m.get(id); } };
 }
@@ -510,7 +506,7 @@ export async function planBus(from, to, route, live = true, at = null) {
   const grids = networks.map((n) => n.grid);
   const boards = nearestPerLine(grids, from);
   const alights = nearestPerLine(grids, to);
-  const eta = live ? await getEta([from, to], intercityRoutes([...boards.values(), ...alights.values()])) : new Map();
+  const eta = live ? await getEta(nearRoutes([...boards.values(), ...alights.values()])) : new Map();
   const waitAt = makeWaiter(eta, clockOf(live, at));
   const options = [];
 
@@ -657,7 +653,7 @@ export async function nearbyArrivals(point, limit = 15) {
   const networks = await getNetworks([point]);
   const hits = [...nearestPerLine(networks.map((n) => n.grid), point).values()]
     .filter((h) => h.i < h.line.stops.length - 1); // 終點站上不了車
-  const eta = await getEta([point], intercityRoutes(hits));
+  const eta = await getEta(nearRoutes(hits));
   const waitAt = makeWaiter(eta, clockOf(true));
   return hits
     .map((h) => {

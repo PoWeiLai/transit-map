@@ -1,7 +1,7 @@
 // 交通部 TDX API：自動取得／更新 token，並限制請求速度
 // 免費金鑰每分鐘只能 5 次，所以大份資料一天抓一次並存到硬碟
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { load, save, addUsage, recentUsage } from './store.js';
+import { load, save, getKv, setKv, addUsage, recentUsage, monthUsage } from './store.js';
 
 const CACHE_DIR = new URL('./data/cache/', import.meta.url);
 const TOKEN_URL = 'https://tdx.transportdata.tw/auth/realms/TDXConnect/protocol/openid-connect/token';
@@ -54,7 +54,9 @@ function throttled(fn) {
 // path 例如 'v3/Rail/TRA/Station'，params 會自動加上 $format=JSON；
 // 進階服務（例如地址定位）用 'advanced/V3/Map/...'，參數是 format=JSON；
 // timeout：大份資料（例如全台公路客運約 18 MB）從國外主機下載要比較久
-export async function tdx(path, params = {}, { timeout = 60000 } = {}) {
+// live：即時資料（到站、誤點、座位、路況、空位），這個月額度快用完時先不抓，留給時刻表等規劃必需的資料
+export async function tdx(path, params = {}, { timeout = 60000, live = false } = {}) {
+  if (live && liveBlocked()) throw new Error('本月 TDX 額度快用完，暫停即時資料');
   const url = path.startsWith(ADVANCED)
     ? `${API_ROOT}${path}?${new URLSearchParams({ format: 'JSON', ...params })}`
     : `${API_BASE}${path}?${new URLSearchParams({ $format: 'JSON', ...params })}`;
@@ -124,6 +126,29 @@ export function weekly(name, fn) {
   return periodic(name, monday, fn);
 }
 
+// 很少變動的小資料（例如兩站間票價、門牌座標）：記憶體 → Turso → TDX，days 天內都不重抓
+export function remembered(key, days, fn) {
+  return cached(`kv:${key}`, 24 * 60 * 60 * 1000, async () => {
+    const hit = (await getKv([key], days * 86400000).catch(() => new Map())).get(key);
+    if (hit !== undefined) return hit;
+    const data = await fn();
+    setKv([[key, data]]).catch((e) => console.log(`Turso 寫入失敗（${key}）：`, e.message));
+    return data;
+  });
+}
+
+// 一次要很多筆時（例如好幾條客運路線的票價）：Turso 有的直接用，沒有的才交給 fetchMissing 一次向 TDX 查（回傳 key → 資料）
+export async function rememberedMany(keys, days, fetchMissing) {
+  const known = await getKv(keys, days * 86400000).catch(() => new Map());
+  const missing = keys.filter((k) => !known.has(k));
+  if (missing.length) {
+    const got = await fetchMissing(missing);
+    for (const k of missing) known.set(k, got.get(k) ?? []);
+    setKv(missing.map((k) => [k, known.get(k)])).catch((e) => console.log('Turso 寫入失敗：', e.message));
+  }
+  return known;
+}
+
 // ---------- TDX 用量紀錄：每天呼叫幾次、下載多少，和 TDX 會員中心對照，接近上限前就知道 ----------
 const FLUSH_MS = 60 * 1000;
 const usage = { date: '', calls: 0, bytes: 0, paths: new Map() }; // 這次開機以來、今天的用量
@@ -139,6 +164,10 @@ function countUsage(path, bytes) {
   const p = usage.paths.get(key) || { calls: 0, bytes: 0 };
   usage.paths.set(key, { calls: p.calls + 1, bytes: p.bytes + bytes });
   pending = { calls: pending.calls + 1, bytes: pending.bytes + bytes };
+  const month = date.slice(0, 7);
+  if (local.month !== month) Object.assign(local, { month, calls: 0, bytes: 0 });
+  local.calls++;
+  local.bytes += bytes;
   // 累積一分鐘寫一次 Turso，不要每次呼叫都寫
   flushTimer ||= setTimeout(() => {
     flushTimer = null;
@@ -149,12 +178,51 @@ function countUsage(path, bytes) {
   flushTimer.unref?.();
 }
 
+// ---------- 每月額度：免費會員每月 3 點（1 點約 1,000～1,500 次或 150 MB），用到 80% 就暫停即時資料，避免帳號又被停權 ----------
+const MONTHLY_POINTS = Number(process.env.TDX_MONTHLY_POINTS) || 3;
+const LIVE_STOP_RATIO = 0.8;
+const POINT_CALLS = 1000;  // 保守估計：次數、流量哪個用得多就算哪個
+const POINT_BYTES = 150e6;
+const MONTH_REFRESH_MS = 10 * 60 * 1000;
+const local = { month: '', calls: 0, bytes: 0 }; // 沒有 Turso 時，只能算這次開機以來的
+let stored = { month: '', calls: 0, bytes: 0, at: 0 }; // Turso 記錄的本月合計（已寫入的部分）
+let refreshing = null;
+
+function refreshMonth() {
+  const month = taipeiNow().date.slice(0, 7);
+  if (stored.month === month && Date.now() - stored.at < MONTH_REFRESH_MS) return Promise.resolve();
+  return (refreshing ||= monthUsage(month)
+    .then((x) => { if (x) stored = { month, ...x, at: Date.now() }; })
+    .catch(() => {})
+    .finally(() => { refreshing = null; }));
+}
+
+function monthTotals() {
+  const month = taipeiNow().date.slice(0, 7);
+  if (stored.month === month) return { calls: stored.calls + pending.calls, bytes: stored.bytes + pending.bytes };
+  return local.month === month ? local : { calls: 0, bytes: 0 };
+}
+
+const usedPoints = () => {
+  const m = monthTotals();
+  return Math.max(m.calls / POINT_CALLS, m.bytes / POINT_BYTES);
+};
+
+function liveBlocked() {
+  refreshMonth(); // 背景更新，不等它
+  return usedPoints() >= MONTHLY_POINTS * LIVE_STOP_RATIO;
+}
+
 // 今天（這台主機）的用量明細，加上 Turso 記錄的最近幾天
 export async function tdxUsage() {
   const top = [...usage.paths].sort((a, b) => b[1].bytes - a[1].bytes).slice(0, 15)
     .map(([path, x]) => ({ path, calls: x.calls, mb: +(x.bytes / 1e6).toFixed(2) }));
   const days = await recentUsage().catch(() => []);
+  await refreshMonth();
+  const m = monthTotals();
   return {
+    month: { month: taipeiNow().date.slice(0, 7), calls: m.calls, mb: +(m.bytes / 1e6).toFixed(2),
+             points: +usedPoints().toFixed(2), limit: MONTHLY_POINTS, livePaused: liveBlocked() },
     sinceStart: { date: usage.date, calls: usage.calls, mb: +(usage.bytes / 1e6).toFixed(2), top },
     days: days.map((d) => ({ ...d, mb: +(d.bytes / 1e6).toFixed(2) })),
   };

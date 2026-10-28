@@ -26,7 +26,7 @@ const shapesOf = (source) => weekly(`traffic-shape-${source.replace('/', '-')}`,
 });
 
 const liveOf = (source) => cached(`traffic-live:${source}`, LIVE_MS, async () => {
-  const body = await tdx(`v2/Road/Traffic/Live/${source}`);
+  const body = await tdx(`v2/Road/Traffic/Live/${source}`, {}, { live: true });
   return new Map((body.LiveTraffics || body).map((x) => [x.SectionID, { speed: x.TravelSpeed, time: x.DataCollectTime }]));
 });
 

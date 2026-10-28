@@ -11,7 +11,7 @@ import { lockersNear } from './lockers.js';
 import { toiletsNear, warmUp as warmUpToilets } from './toilets.js';
 import { garbageNear, garbageRoute, warmUp as warmUpGarbage } from './garbage.js';
 import { planRail, railStations } from './rail.js';
-import { tdx, hasTdx, taipeiNow, tdxUsage } from './tdx.js';
+import { tdx, hasTdx, remembered, taipeiNow, tdxUsage } from './tdx.js';
 import { planMetro, metroMap } from './metro.js';
 
 // TDX 金鑰等設定放在 .env（不進版控）
@@ -264,7 +264,8 @@ async function tdxAddress(text, near) {
   if (hasTdx()) {
     for (const ar of areas.slice(0, near ? 1 : ADDRESS_AREAS)) { // 知道出發點時只查最近的那個地區
       const full = `${ar.city}${ar.district}${ar.road}${a.number}號`;
-      const list = await tdx(`advanced/V3/Map/GeoCode/Coordinate/Address/${encodeURIComponent(full)}`).catch(() => []);
+      // 門牌座標幾乎不會變，查過的存在 Turso 三個月
+      const list = await remembered(`geocode:${full}`, 90, () => tdx(`advanced/V3/Map/GeoCode/Coordinate/Address/${encodeURIComponent(full)}`)).catch(() => []);
       for (const r of list) {
         // 查不到時 TDX 會回傳不相干的近似地址（例如別區的巷子），路名和門牌要對得上才採用
         if (!plain(r.Address).includes(`${ar.road}${a.number}號`)) continue;

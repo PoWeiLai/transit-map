@@ -36,7 +36,7 @@ const lotsOf = (city) => weekly(`parking-${city}`, async () => {
 
 // 停車場 → { car: { total, available }, moto: {…} }；沒有即時資料的停車場不在裡面
 const availOf = (city) => cached(`parking-avail:${city}`, AVAIL_MS, async () => {
-  const { ParkingAvailabilities } = await tdx(`v1/Parking/OffStreet/ParkingAvailability/City/${city}`);
+  const { ParkingAvailabilities } = await tdx(`v1/Parking/OffStreet/ParkingAvailability/City/${city}`, {}, { live: true });
   return new Map(ParkingAvailabilities.map((a) => {
     const by = {};
     for (const [kind, type] of Object.entries(SPACE)) {
