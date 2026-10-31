@@ -214,6 +214,21 @@ const PHOTON_GAP_MS = 300; // Photon 短時間內查太多次會整個封鎖一�
 const BRANCH = /(分店|門市|分館|店|館|站)$/;
 const swapTai = (s) => (s.includes('台') ? s.replace(/台/g, '臺') : s.replace(/臺/g, '台'));
 
+const HINT_NEAR_M = 1500; // 分店離提示的地點超過這個距離，就當作地圖上沒有這家分店
+
+// 查位置提示（「南陽」）在哪：地名本身和「南陽街」「南陽路」都查，名稱要含有那幾個字。
+// 同名的地方全台很多（台北、汐止、台中都有南陽街）：知道出發點就挑離出發點近的，不然挑離某家分店最近的
+async function hintSpot(where, near, found) {
+  const spots = [];
+  for (const q of [where, `${where}街`, `${where}路`]) {
+    await new Promise((r) => setTimeout(r, PHOTON_GAP_MS));
+    const hits = await photonOnce(q, near || found[0], 5).catch(() => []);
+    spots.push(...hits.filter((s) => plain(s.name).includes(where)));
+  }
+  const cost = (s) => (near ? distance(near, s) : Math.min(...found.map((r) => distance(r, s))));
+  return spots.sort((a, b) => cost(a) - cost(b))[0] || null;
+}
+
 async function fuzzyPlace(text, near) {
   const q = plain(text).replace(/火車站/g, '車站');
   if (q.length < 3 || /\d+號/.test(q)) return []; // 門牌地址交給 TDX
@@ -240,16 +255,20 @@ async function fuzzyPlace(text, near) {
     if (!found.length) continue;
     // 位置提示：名稱或地址寫到的優先，不然查那個地名（附近的路、地區），挑離它近的
     const where = plain(hint).replace(BRANCH, '');
-    let anchor = near;
     const named = found.filter((r) => where && plain(r.label).includes(where));
-    if (where.length >= 2 && !named.length) {
-      const [spot] = await photonOnce(where, near || found[0], 3).catch(() => []);
-      if (spot && found.some((r) => distance(r, spot) < 5000)) anchor = spot;
-    }
+    const spot = where.length >= 2 && !named.length ? await hintSpot(where, near, found) : null;
+    const anchor = spot || near;
     const sorted = (named.length ? named : found)
       .sort((a, b) => (anchor ? distance(anchor, a) - distance(anchor, b) : 0))
-      .filter((r, i, all) => !all.slice(0, i).some((x) => distance(x, r) < 50)); // 台／臺 兩種寫法查到同一個
-    return sorted.slice(0, 3).map((r) => ({ ...r, name: `${r.name}（查不到「${text}」，這是最接近的地點）`, approx: true }));
+      .filter((r, i, all) => !all.slice(0, i).some((x) => distance(x, r) < 50)) // 台／臺 兩種寫法查到同一個
+      .slice(0, 3)
+      .map((r) => ({ ...r, name: `${r.name}（查不到「${text}」，這是最接近的地點）`, approx: true }));
+    // 地圖上那附近沒有這家（「台鐵便當南陽店」在南陽街，地圖上最近的分店在 6 公里外的信義區）：
+    // 直接帶到提示的地點（南陽街），別的分店放後面備選，不要把人帶到屏東
+    if (spot && distance(spot, sorted[0]) > HINT_NEAR_M) {
+      return [{ ...spot, name: `${spot.name}（查不到「${text}」，帶你到「${spot.name}」附近）`, approx: true }, ...sorted];
+    }
+    return sorted;
   }
   return [];
 }
