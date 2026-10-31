@@ -13,6 +13,7 @@ import { garbageNear, garbageRoute, warmUp as warmUpGarbage } from './garbage.js
 import { planRail, railStations } from './rail.js';
 import { tdx, hasTdx, remembered, taipeiNow, tdxUsage } from './tdx.js';
 import { planMetro, metroMap } from './metro.js';
+import { googlePlace, googleUsage } from './google.js';
 
 // TDX 金鑰等設定放在 .env（不進版控）
 try { process.loadEnvFile(); } catch { /* 沒有 .env 也能跑 */ }
@@ -369,6 +370,13 @@ function rank(results, q, near) {
   return sorted.filter((r, i) => !sorted.slice(0, i).some((x) => distance(x, r) < 100));
 }
 
+// 名稱像不像輸入的文字：輸入的字有六成以上出現在名稱裡
+function looksLike(name, q) {
+  const chars = [...new Set(plain(q))];
+  const n = plain(name);
+  return chars.filter((c) => n.includes(c)).length >= chars.length * 0.6;
+}
+
 function geocode(text, near) {
   const q = ALIASES[text] || text;
   const key = near ? `${q}@${near.lat.toFixed(1)},${near.lng.toFixed(1)}` : q;
@@ -385,7 +393,12 @@ function geocode(text, near) {
     // 兩個服務的結果合在一起排序；Nominatim 不能用時只靠 Photon
     found = found.concat(await photon(q, near).catch(() => []));
     let results = rank(found, q, near).slice(0, 5);
-    // 整句都查不到：放寬條件找最接近的（已經依位置提示排好，不再重排）
+    // 地圖資料查不到，或查到的名稱跟輸入的不像（「誠品信義店」查到「城中城品」）：問 Google，查到的排最前面
+    if (!results.some((r) => r.exact || looksLike(r.name, q))) {
+      const google = await googlePlace(q, near).catch(() => []);
+      if (google.length) results = [...google, ...results].slice(0, 5);
+    }
+    // 還是查不到：放寬條件找最接近的（已經依位置提示排好，不再重排）
     if (!results.length) results = await fuzzyPlace(q, near).catch(() => []);
     geocodeCache.set(key, results);
     return results;
@@ -923,7 +936,7 @@ app.get('/api/rail', wrap(async (req, res) => {
 }));
 
 // TDX 用量：這次開機以來今天的明細（哪些資料最大），以及 Turso 記錄的最近幾天，和 TDX 會員中心對照
-app.get('/api/tdx-usage', wrap(async (req, res) => res.json(await tdxUsage())));
+app.get('/api/tdx-usage', wrap(async (req, res) => res.json({ ...(await tdxUsage()), google: await googleUsage() })));
 
 // 寄放行李：某個地點（例如下車的車站、目的地）附近的置物櫃
 app.get('/api/lockers', wrap(async (req, res) => {

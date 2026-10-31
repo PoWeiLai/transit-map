@@ -22,3 +22,8 @@ services:
         sync: false
       - key: TURSO_AUTH_TOKEN
         sync: false
+      # Google 地點搜尋：地圖資料找不到的店家（例如「台鐵便當南陽店」）自動問 Google，不用使用者自己去複製連結。
+      # 到 https://console.cloud.google.com 建專案 → 啟用「Places API (New)」→ 憑證 → 建立 API 金鑰（建議限制只能用 Places API）。
+      # 每月前 5,000 次免費，程式預設用到 4,000 次就暫停（GOOGLE_MONTHLY_CALLS 可調整）。不設定也能跑，只是不會問 Google。
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
