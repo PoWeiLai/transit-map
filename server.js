@@ -183,9 +183,9 @@ async function photon(q, near) {
   return [];
 }
 
-async function photonOnce(q, near) {
+async function photonOnce(q, near, limit = 5) {
   // Photon 只認得「臺中市」這種正式寫法，「台中市」會查不到
-  const params = { q: q.replace(/台([北中南東][市縣])/g, '臺$1'), limit: '5', bbox: TAIWAN_BBOX };
+  const params = { q: q.replace(/台([北中南東][市縣])/g, '臺$1'), limit: String(limit), bbox: TAIWAN_BBOX };
   if (near) Object.assign(params, { lat: near.lat, lon: near.lng });
   const url = `${PHOTON_URL}?${new URLSearchParams(params)}`;
   const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(10000) });
@@ -202,6 +202,45 @@ async function photonOnce(q, near) {
       road: p.osm_key === 'highway' && ROAD_TYPES.has(p.osm_value),
     };
   });
+}
+
+// ---------- 整句查不到時，放寬條件找最接近的地點 ----------
+// 地圖資料的名稱常跟使用者打的不完全一樣（「台鐵便當南陽店」在地圖上只有「臺鐵便當本舖2號店」）：
+// 從後面或前面一次少一個字再查，直到查到名稱含有剩下文字的地點；
+// 去掉的字（「南陽」）當成位置提示，挑離那裡（南陽街）最近的分店
+const FUZZY_TRIES = 6; // 最多查幾種少字的寫法（每種查 台／臺 兩個寫法）
+const BRANCH = /(分店|門市|分館|店|館|站)$/;
+const swapTai = (s) => (s.includes('台') ? s.replace(/台/g, '臺') : s.replace(/臺/g, '台'));
+
+async function fuzzyPlace(text, near) {
+  const q = plain(text).replace(/火車站/g, '車站');
+  if (q.length < 3 || /\d+號/.test(q)) return []; // 門牌地址交給 TDX
+  const tries = [];
+  if (q !== plain(text)) tries.push({ core: q, hint: '' });
+  for (let k = 1; q.length - k >= 2; k++) {
+    tries.push({ core: q.slice(0, -k), hint: q.slice(-k) }, { core: q.slice(k), hint: q.slice(0, k) });
+  }
+  for (const { core, hint } of tries.slice(0, FUZZY_TRIES)) {
+    // Photon 暫時不能用就不再一直試
+    const lists = await Promise.all([core, swapTai(core)].filter((x, i, a) => a.indexOf(x) === i)
+      .map((x) => photonOnce(x, near, 10)));
+    // Photon 會回傳只像一點點的地點（查「台鐵便當」給「台富便當」），名稱要真的含有那幾個字
+    const found = lists.flat().filter((r) => !r.road && plain(r.name).includes(core));
+    if (!found.length) continue;
+    // 位置提示：名稱或地址寫到的優先，不然查那個地名（附近的路、地區），挑離它近的
+    const where = plain(hint).replace(BRANCH, '');
+    let anchor = near;
+    const named = found.filter((r) => where && plain(r.label).includes(where));
+    if (where.length >= 2 && !named.length) {
+      const [spot] = await photonOnce(where, near || found[0], 3).catch(() => []);
+      if (spot && found.some((r) => distance(r, spot) < 5000)) anchor = spot;
+    }
+    const sorted = (named.length ? named : found)
+      .sort((a, b) => (anchor ? distance(anchor, a) - distance(anchor, b) : 0))
+      .filter((r, i, all) => !all.slice(0, i).some((x) => distance(x, r) < 50)); // 台／臺 兩種寫法查到同一個
+    return sorted.slice(0, 3).map((r) => ({ ...r, name: `${r.name}（查不到「${text}」，這是最接近的地點）`, approx: true }));
+  }
+  return [];
 }
 
 // ---------- 門牌地址（TDX 地址定位，資料來自內政部門牌） ----------
@@ -345,7 +384,9 @@ function geocode(text, near) {
     }
     // 兩個服務的結果合在一起排序；Nominatim 不能用時只靠 Photon
     found = found.concat(await photon(q, near).catch(() => []));
-    const results = rank(found, q, near).slice(0, 5);
+    let results = rank(found, q, near).slice(0, 5);
+    // 整句都查不到：放寬條件找最接近的（已經依位置提示排好，不再重排）
+    if (!results.length) results = await fuzzyPlace(q, near).catch(() => []);
     geocodeCache.set(key, results);
     return results;
   });
