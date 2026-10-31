@@ -209,7 +209,8 @@ async function photonOnce(q, near, limit = 5) {
 // 地圖資料的名稱常跟使用者打的不完全一樣（「台鐵便當南陽店」在地圖上只有「臺鐵便當本舖2號店」）：
 // 從後面或前面一次少一個字再查，直到查到名稱含有剩下文字的地點；
 // 去掉的字（「南陽」）當成位置提示，挑離那裡（南陽街）最近的分店
-const FUZZY_TRIES = 6; // 最多查幾種少字的寫法（每種查 台／臺 兩個寫法）
+const FUZZY_TRIES = 5; // 最多查幾種少字的寫法（每種查 台／臺 兩個寫法）
+const PHOTON_GAP_MS = 300; // Photon 短時間內查太多次會整個封鎖一陣子
 const BRANCH = /(分店|門市|分館|店|館|站)$/;
 const swapTai = (s) => (s.includes('台') ? s.replace(/台/g, '臺') : s.replace(/臺/g, '台'));
 
@@ -218,15 +219,24 @@ async function fuzzyPlace(text, near) {
   if (q.length < 3 || /\d+號/.test(q)) return []; // 門牌地址交給 TDX
   const tries = [];
   if (q !== plain(text)) tries.push({ core: q, hint: '' });
-  for (let k = 1; q.length - k >= 2; k++) {
-    tries.push({ core: q.slice(0, -k), hint: q.slice(-k) }, { core: q.slice(k), hint: q.slice(0, k) });
-  }
+  // 先試少後面的字（店名後面常多寫分店名），再試少前面的字（「高雄夢時代」）
+  for (let k = 1; q.length - k >= 2 && k <= 3; k++) tries.push({ core: q.slice(0, -k), hint: q.slice(-k) });
+  for (let k = 1; q.length - k >= 2 && k <= 2; k++) tries.push({ core: q.slice(k), hint: q.slice(0, k) });
+  let failures = 0;
   for (const { core, hint } of tries.slice(0, FUZZY_TRIES)) {
-    // Photon 暫時不能用就不再一直試
-    const lists = await Promise.all([core, swapTai(core)].filter((x, i, a) => a.indexOf(x) === i)
-      .map((x) => photonOnce(x, near, 10)));
+    // 台／臺 兩種寫法一個一個查（同時查 Photon 常拒絕）；連續失敗好幾次就是 Photon 暫時不能用，不再一直試
+    const hits = [];
+    for (const x of new Set([core, swapTai(core)])) {
+      await new Promise((r) => setTimeout(r, PHOTON_GAP_MS));
+      try {
+        hits.push(...await photonOnce(x, near, 10));
+        failures = 0;
+      } catch {
+        if (++failures >= 3) return [];
+      }
+    }
     // Photon 會回傳只像一點點的地點（查「台鐵便當」給「台富便當」），名稱要真的含有那幾個字
-    const found = lists.flat().filter((r) => !r.road && plain(r.name).includes(core));
+    const found = hits.filter((r) => !r.road && plain(r.name).includes(core));
     if (!found.length) continue;
     // 位置提示：名稱或地址寫到的優先，不然查那個地名（附近的路、地區），挑離它近的
     const where = plain(hint).replace(BRANCH, '');
